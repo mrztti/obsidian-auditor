@@ -1,0 +1,207 @@
+.auditor-search-container {
+	padding: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	height: 100%;
+	overflow-y: auto;
+}
+
+.auditor-search-header {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.auditor-search-input-row {
+	display: flex;
+	gap: 6px;
+}
+
+.auditor-search-input {
+	flex: 1;
+	padding: 6px 8px;
+}
+
+.auditor-search-btn {
+	padding: 6px 12px;
+	cursor: pointer;
+}
+
+.auditor-index-btn {
+	font-size: 0.8em;
+	padding: 4px 8px;
+	cursor: pointer;
+	align-self: flex-start;
+}
+
+.auditor-results {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.auditor-result-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 10px 12px;
+	background: var(--background-secondary);
+}
+
+.auditor-result-meta {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 2px;
+	margin-bottom: 6px;
+	font-size: 0.85em;
+}
+
+.auditor-result-file {
+	font-weight: 600;
+	color: var(--text-accent);
+	cursor: pointer;
+}
+
+.auditor-result-file:hover {
+	text-decoration: underline;
+}
+
+.auditor-result-sep {
+	color: var(--text-muted);
+}
+
+.auditor-result-section {
+	color: var(--text-normal);
+}
+
+.auditor-result-score {
+	color: var(--text-muted);
+	margin-left: 4px;
+}
+
+.auditor-result-preview {
+	font-size: 0.82em;
+	color: var(--text-muted);
+	margin: 0;
+	line-height: 1.5;
+	white-space: pre-wrap;
+}
+
+.auditor-status {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.auditor-section-container {
+	padding: 16px;
+	overflow-y: auto;
+	height: 100%;
+}
+
+.auditor-section-header {
+	margin-bottom: 12px;
+}
+
+.auditor-section-block {
+	margin-bottom: 20px;
+}
+
+.auditor-section-title {
+	margin-bottom: 6px;
+}
+
+.auditor-section-textarea {
+	width: 100%;
+	box-sizing: border-box;
+	resize: vertical;
+}
+
+.auditor-evidence-find-btn {
+	margin-top: 8px;
+	cursor: pointer;
+}
+
+.auditor-evidence-suggestions {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.auditor-evidence-chip {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-secondary);
+}
+
+.auditor-evidence-chip-main {
+	min-width: 0;
+}
+
+.auditor-evidence-chip-label {
+	font-size: 0.85em;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.auditor-evidence-chip-passage {
+	margin: 4px 0 0;
+	font-size: 0.8em;
+	color: var(--text-muted);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.auditor-evidence-chip-actions {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.auditor-image-gallery {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-bottom: 8px;
+}
+
+.auditor-image-thumb {
+	position: relative;
+	max-width: 200px;
+}
+
+.auditor-image-thumb img {
+	max-width: 200px;
+	max-height: 200px;
+	border-radius: 6px;
+	display: block;
+}
+
+.auditor-image-remove {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	line-height: 1;
+	padding: 2px 6px;
+	cursor: pointer;
+}
+
+.auditor-image-dropzone {
+	border: 2px dashed var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 16px;
+	text-align: center;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.auditor-image-dropzone:focus {
+	border-color: var(--interactive-accent);
+	color: var(--text-normal);
+}

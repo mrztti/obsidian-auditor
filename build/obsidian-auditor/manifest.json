@@ -1,0 +1,11 @@
+{
+	"id": "obsidian-auditor",
+	"name": "Auditor",
+	"version": "1.0.1",
+	"minAppVersion": "1.7.2",
+	"description": "Document RAG and Control interface for Audits",
+	"author": "mrztti",
+	"authorUrl": "https://github.com/mrztti",
+	"fundingUrl": "https://github.com/mrztti",
+	"isDesktopOnly": true
+}
