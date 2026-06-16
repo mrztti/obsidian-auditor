@@ -1,8 +1,11 @@
 /* eslint-disable no-console */
-import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
+import { FileSystemAdapter, MarkdownView, Notice, Plugin, TFile, normalizePath } from 'obsidian';
 import { AuditorSettings, DEFAULT_SETTINGS, AuditorSettingTab } from './settings';
 import { ModelLoadProgress, VaultIndexer } from './indexer';
 import { SearchView, SEARCH_VIEW_TYPE } from './searchView';
+import { SectionView, SECTION_VIEW_TYPE, FRONTMATTER_KEY, FRONTMATTER_VALUE } from './sectionView';
+import { buildSkeleton } from './sections';
+import { NewFindingModal } from './newFindingModal';
 
 const log = (...args: unknown[]) => console.log('[Auditor]', ...args);
 
@@ -26,10 +29,20 @@ export default class AuditorPlugin extends Plugin {
 		);
 
 		this.registerView(SEARCH_VIEW_TYPE, (leaf) => new SearchView(leaf, this));
+		this.registerView(SECTION_VIEW_TYPE, (leaf) => new SectionView(leaf, this));
 
 		this.addRibbonIcon('search', 'Open vault search', () => {
 			void this.activateSearchView();
 		});
+
+		this.addRibbonIcon('list-tree', 'Open as audit finding', () => {
+			const file = this.app.workspace.getActiveFile();
+			if (file && file.extension === 'md') void this.maybeReplaceWithSectionView(file, true);
+		});
+
+		this.registerEvent(this.app.workspace.on('file-open', (file) => {
+			if (file) void this.maybeReplaceWithSectionView(file);
+		}));
 
 		this.addCommand({
 			id: 'open-semantic-search',
@@ -41,6 +54,27 @@ export default class AuditorPlugin extends Plugin {
 			id: 'reindex-folder',
 			name: 'Re-index vault folder',
 			callback: () => { void this.runIndexing(); },
+		});
+
+		this.addCommand({
+			id: 'open-audit-sections',
+			name: 'Open as audit sections',
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension !== 'md') return false;
+				if (!checking) {
+					void this.maybeReplaceWithSectionView(file, true);
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'new-finding-note',
+			name: 'New finding note',
+			callback: () => {
+				new NewFindingModal(this.app, (name) => { void this.createFindingNote(name); }).open();
+			},
 		});
 
 		this.addSettingTab(new AuditorSettingTab(this.app, this));
@@ -122,6 +156,49 @@ export default class AuditorPlugin extends Plugin {
 		if (!leaf) return;
 		await leaf.setViewState({ type: SEARCH_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	/**
+	 * Reads the frontmatter flag straight from disk rather than `metadataCache`,
+	 * which can lag behind a just-opened or just-created file and cause the
+	 * auto-swap below to silently no-op on the first open.
+	 */
+	private async isFindingNote(file: TFile): Promise<boolean> {
+		if (file.extension !== 'md') return false;
+		const content = await this.app.vault.cachedRead(file);
+		const fmMatch = /^---\n([\s\S]*?)\n---/.exec(content);
+		if (!fmMatch) return false;
+		const re = new RegExp(`^${FRONTMATTER_KEY}:\\s*["']?${FRONTMATTER_VALUE}["']?\\s*$`, 'm');
+		return re.test(fmMatch[1]!);
+	}
+
+	/**
+	 * Swaps every markdown leaf currently showing `file` over to our
+	 * full-replacement SectionView, when the file is flagged as a finding note.
+	 */
+	private async maybeReplaceWithSectionView(file: TFile, skipFlagCheck = false): Promise<void> {
+		log('maybeReplaceWithSectionView: checking', file.path);
+		if (!skipFlagCheck && !(await this.isFindingNote(file))) {
+			log('maybeReplaceWithSectionView: not a finding note, skipping', file.path);
+			return;
+		}
+		const leaves = this.app.workspace.getLeavesOfType('markdown');
+		log('maybeReplaceWithSectionView: candidate markdown leaves', leaves.length);
+		for (const leaf of leaves) {
+			const view = leaf.view;
+			if (view instanceof MarkdownView && view.file?.path === file.path) {
+				log('maybeReplaceWithSectionView: swapping leaf for', file.path);
+				await leaf.setViewState({ type: SECTION_VIEW_TYPE, state: leaf.getViewState().state });
+			}
+		}
+	}
+
+	/** Creates a new note flagged with our frontmatter type and the empty 4-section skeleton. */
+	private async createFindingNote(title: string): Promise<void> {
+		const path = normalizePath(`${title}.md`);
+		const content = `---\n${FRONTMATTER_KEY}: ${FRONTMATTER_VALUE}\n---\n\n${buildSkeleton()}`;
+		const file = await this.app.vault.create(path, content);
+		await this.app.workspace.getLeaf(false).openFile(file);
 	}
 
 	async loadSettings() {

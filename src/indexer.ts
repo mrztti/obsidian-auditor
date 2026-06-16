@@ -215,7 +215,7 @@ export class VaultIndexer {
 
 		const output: SearchResult[] = [];
 		for (const result of results as LocalDocumentResult[]) {
-			const sections = await result.renderSections(500, 1, true);
+			const sections = await result.renderSections(1200, 3, true);
 			output.push({
 				score: result.score,
 				filePath: result.uri,

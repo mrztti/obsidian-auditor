@@ -1,11 +1,11 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
-	"version": "1.0.0",
+	"id": "obsidian-auditor",
+	"name": "Auditor",
+	"version": "1.0.1",
 	"minAppVersion": "1.7.2",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"description": "Document RAG and Control interface for Audits",
+	"author": "mrztti",
+	"authorUrl": "https://github.com/mrztti",
+	"fundingUrl": "https://github.com/mrztti",
 	"isDesktopOnly": true
 }

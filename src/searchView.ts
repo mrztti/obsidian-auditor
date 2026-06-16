@@ -95,7 +95,7 @@ export class SearchView extends ItemView {
 
 			for (const section of result.sections) {
 				card.createEl('p', {
-					text: section.length > 300 ? section.slice(0, 300) + '…' : section,
+					text: section.length > 600 ? section.slice(0, 600) + '…' : section,
 					cls: 'auditor-result-preview',
 				});
 			}
