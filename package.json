@@ -30,6 +30,7 @@
 		"@llm-tools/embedjs-libsql": "^0.1.31",
 		"@llm-tools/embedjs-llama-cpp": "^0.1.31",
 		"onnxruntime-web": "^1.26.0",
+		"pdfjs-dist": "^4",
 		"vectra": "^0.15.0"
 	}
 }

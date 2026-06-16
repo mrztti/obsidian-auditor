@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-import { Notice, Plugin } from 'obsidian';
+import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
 import { AuditorSettings, DEFAULT_SETTINGS, AuditorSettingTab } from './settings';
 import { ModelLoadProgress, VaultIndexer } from './indexer';
 import { SearchView, SEARCH_VIEW_TYPE } from './searchView';
@@ -16,10 +16,13 @@ export default class AuditorPlugin extends Plugin {
 		await this.loadSettings();
 		log('onload: settings loaded', this.settings);
 
+		const indexRootFolder = this.getIndexRootFolder();
+		log('onload: index root folder', indexRootFolder);
 		this.indexer = new VaultIndexer(
 			this.settings.embeddingModel,
+			indexRootFolder,
 			undefined,
-			(progress) => { this.onModelProgress(progress); },
+			(progress: ModelLoadProgress) => { this.onModelProgress(progress); },
 		);
 
 		this.registerView(SEARCH_VIEW_TYPE, (leaf) => new SearchView(leaf, this));
@@ -45,6 +48,16 @@ export default class AuditorPlugin extends Plugin {
 
 	onunload() {
 		log('onunload: plugin unloading');
+	}
+
+	/** Absolute path to this plugin's own data folder, used to persist the vector index as plain files. */
+	private getIndexRootFolder(): string {
+		const adapter = this.app.vault.adapter;
+		if (!(adapter instanceof FileSystemAdapter)) {
+			throw new Error('Auditor requires the desktop app (FileSystemAdapter) to persist its index.');
+		}
+		const relativePath = `${this.app.vault.configDir}/plugins/${this.manifest.id}/vector-index`;
+		return adapter.getFullPath(relativePath);
 	}
 
 	/** Surfaces @huggingface/transformers model download progress as a Notice "progress bar". */

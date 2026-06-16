@@ -10,6 +10,31 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === 'production';
 
+// pdf.js's worker must run as a real, isolated Web Worker — not the
+// 'globalThis.pdfjsWorker' fake-main-thread-worker hack — because Obsidian's
+// native PDF viewer bundles its own (different-versioned) copy of pdfjs-dist
+// and reads that same global. Sharing it causes the native viewer to either
+// break immediately or permanently memoize our worker handler the first time
+// it happens to observe it (pdf.js caches that decision for the process
+// lifetime). We can't ship the worker as a sibling file either: whatever dev
+// deploy tooling copies this plugin into the vault only syncs main.js,
+// manifest.json and styles.css, so any extra file we emit never reaches the
+// installed plugin folder. Instead we bundle the worker to a string and embed
+// it directly inside main.js; at runtime we turn that string into a Blob URL,
+// which still gives pdf.js a fully separate, real Worker thread.
+const workerBuild = await esbuild.build({
+	entryPoints: ['node_modules/pdfjs-dist/build/pdf.worker.mjs'],
+	bundle: true,
+	format: 'esm',
+	target: 'es2021',
+	logLevel: 'info',
+	treeShaking: true,
+	minify: prod,
+	platform: 'browser',
+	write: false,
+});
+const pdfWorkerSource = workerBuild.outputFiles[0].text;
+
 const context = await esbuild.context({
 	banner: {
 		js: banner,
@@ -48,6 +73,7 @@ const context = await esbuild.context({
 		// its .wasm binaries. Point it at the matching version on jsdelivr so that
 		// relative URL resolution lands on real files instead of throwing on `undefined`.
 		'import.meta.url': JSON.stringify('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.bundle.min.mjs'),
+		__PDF_WORKER_SOURCE__: JSON.stringify(pdfWorkerSource),
 	},
 });
 

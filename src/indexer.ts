@@ -1,12 +1,41 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, no-console */
 import * as ort from 'onnxruntime-web/webgpu';
+import * as pdfjsLib from 'pdfjs-dist';
 import {
 	LocalDocumentIndex,
-	VirtualFileStorage as IndexedDBStorage,
 	TransformersEmbeddings,
 	type LocalDocumentResult,
 } from 'vectra/browser';
-import { Vault } from 'obsidian';
+// `vectra/browser` only exposes VirtualFileStorage (in-memory) and
+// IndexedDBStorage (browser storage, size-limited and easy to lose). Obsidian
+// desktop runs in Electron's renderer with full Node access, so we use the
+// real `vectra/node` LocalFileStorage to persist the index as plain files on
+// disk inside the plugin's own data folder.
+import { LocalFileStorage } from 'vectra/node';
+import { Vault, type TFile } from 'obsidian';
+
+const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf']);
+
+// Injected at build time by esbuild.config.mjs: the full bundled source of
+// pdfjs-dist's worker, embedded as a string so it ships inside main.js itself
+// (see esbuild.config.mjs for why we can't rely on a sibling file).
+declare const __PDF_WORKER_SOURCE__: string;
+
+// Turning the embedded worker source into a Blob URL gives pdf.js a real,
+// isolated Worker thread to load it into — never touching
+// `globalThis.pdfjsWorker`, which Obsidian's own native PDF viewer (a
+// separate, differently-versioned copy of pdfjs-dist) also reads and would
+// conflict with.
+const pdfWorkerBlobUrl = URL.createObjectURL(
+	new Blob([__PDF_WORKER_SOURCE__], { type: 'text/javascript' }),
+);
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerBlobUrl;
+
+/** Lets the UI thread repaint between heavy synchronous embedding calls. */
+const yieldToUI = (): Promise<void> =>
+	new Promise((resolve) => {
+		window.setTimeout(resolve, 0);
+	});
 
 // Obsidian runs plugins in Electron's renderer process, where `process` is
 // defined. @huggingface/transformers' env detection therefore sets
@@ -38,22 +67,27 @@ export interface ModelLoadProgress {
 const log = (...args: unknown[]) => console.log('[Auditor]', ...args);
 
 export class VaultIndexer {
-	private storage: IndexedDBStorage;
+	private storage: LocalFileStorage;
 	private modelName: string;
 	private chunkSize: number;
 	private indexPromise: Promise<LocalDocumentIndex> | null = null;
 	private onModelProgress?: (progress: ModelLoadProgress) => void;
 
+	/**
+	 * @param indexRootFolder Absolute path to a folder (inside the plugin's own
+	 * data directory) where the vector index is persisted as plain files.
+	 */
 	constructor(
 		modelName: string,
+		indexRootFolder: string,
 		chunkSize = 512,
 		onModelProgress?: (progress: ModelLoadProgress) => void,
 	) {
-		this.storage = new IndexedDBStorage();
+		this.storage = new LocalFileStorage(indexRootFolder);
 		this.modelName = modelName;
 		this.chunkSize = chunkSize;
 		this.onModelProgress = onModelProgress;
-		log('VaultIndexer constructed', { modelName, chunkSize });
+		log('VaultIndexer constructed', { modelName, chunkSize, indexRootFolder });
 	}
 
 	/** Lazily initialises embeddings + index on first use. */
@@ -102,25 +136,72 @@ export class VaultIndexer {
 		log('indexVaultFolder: starting', { folderPath });
 		const idx = await this.getIndex();
 
-		const files = vault.getMarkdownFiles().filter((f) => {
+		const prefix = folderPath
+			? folderPath.endsWith('/')
+				? folderPath
+				: folderPath + '/'
+			: '';
+		const files = vault.getFiles().filter((f) => {
+			if (!INDEXABLE_EXTENSIONS.has(f.extension)) return false;
 			if (!folderPath) return true;
-			return (
-				f.path.startsWith(
-					folderPath.endsWith('/') ? folderPath : folderPath + '/',
-				) || f.path === folderPath
-			);
+			return f.path.startsWith(prefix) || f.path === folderPath;
 		});
-		log('indexVaultFolder: files matched', files.length);
+		log('indexVaultFolder: files matched', files.length, {
+			md: files.filter((f) => f.extension === 'md').length,
+			pdf: files.filter((f) => f.extension === 'pdf').length,
+		});
 
 		for (let i = 0; i < files.length; i++) {
 			const file = files[i]!;
 			log('indexVaultFolder: indexing file', file.path);
 			onProgress?.(i, files.length, `Indexing ${file.basename}…`);
-			const content = await vault.cachedRead(file);
-			await idx.upsertDocument(file.path, content, 'txt');
+			try {
+				const content = await this.readFileText(vault, file);
+				if (content.trim().length > 0) {
+					await idx.upsertDocument(file.path, content, 'txt');
+				} else {
+					log('indexVaultFolder: skipping empty/unreadable file', file.path);
+				}
+			} catch (e) {
+				console.error('[Auditor] failed to index', file.path, e);
+			}
 			onProgress?.(i + 1, files.length, `Done ${file.basename}`);
+			// Hand the main thread back to the UI so the progress bar repaints
+			// between documents instead of freezing for the whole batch.
+			await yieldToUI();
 		}
 		log('indexVaultFolder: complete');
+	}
+
+	/** Reads a file as plain text, extracting PDF text content where needed. */
+	private async readFileText(vault: Vault, file: TFile): Promise<string> {
+		if (file.extension === 'pdf') {
+			const data = await vault.readBinary(file);
+			return this.extractPdfText(new Uint8Array(data));
+		}
+		return vault.cachedRead(file);
+	}
+
+	/** Extracts concatenated text from every page of a PDF. */
+	private async extractPdfText(data: Uint8Array): Promise<string> {
+		const pdf = await pdfjsLib.getDocument({
+			data,
+			isEvalSupported: false,
+			// Avoid noisy console output for fonts we don't need (text only).
+			verbosity: 0,
+		}).promise;
+		const pages: string[] = [];
+		for (let p = 1; p <= pdf.numPages; p++) {
+			const page = await pdf.getPage(p);
+			const content = await page.getTextContent();
+			const text = content.items
+				.map((item) => ('str' in item ? item.str : ''))
+				.join(' ');
+			pages.push(text);
+			page.cleanup();
+		}
+		await pdf.destroy();
+		return pages.join('\n\n');
 	}
 
 	async search(query: string, topK: number): Promise<SearchResult[]> {
