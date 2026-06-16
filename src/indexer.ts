@@ -16,6 +16,17 @@ import { Vault, type TFile } from 'obsidian';
 
 const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf']);
 
+/** Converts a simple '*'-wildcard pattern into a path-matching RegExp. */
+function patternToRegExp(pattern: string): RegExp {
+	const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+	return new RegExp(`^${escaped}$`);
+}
+
+/** True if `path` matches any of the given '*'-wildcard patterns (blank/whitespace lines ignored). */
+function matchesAnyPattern(path: string, patterns: string[]): boolean {
+	return patterns.some((p) => patternToRegExp(p).test(path));
+}
+
 // Injected at build time by esbuild.config.mjs: the full bundled source of
 // pdfjs-dist's worker, embedded as a string so it ships inside main.js itself
 // (see esbuild.config.mjs for why we can't rely on a sibling file).
@@ -146,6 +157,7 @@ export class VaultIndexer {
 		vault: Vault,
 		folderPath: string,
 		onProgress?: (done: number, total: number, label: string) => void,
+		titleOnlyPaths: string[] = [],
 	): Promise<void> {
 		log('indexVaultFolder: starting', { folderPath });
 		const idx = await this.getIndex();
@@ -178,9 +190,10 @@ export class VaultIndexer {
 			log('indexVaultFolder: indexing file', file.path);
 			onProgress?.(i, files.length, `Indexing ${file.basename}…`);
 			try {
-				// Files prefixed with "_" are ingested by title only — their
-				// content is intentionally never embedded.
-				if (file.basename.startsWith('_')) {
+				// Files prefixed with "_", or matching a user-configured title-only
+				// path pattern, are ingested by title only — their content is
+				// intentionally never embedded.
+				if (file.basename.startsWith('_') || matchesAnyPattern(file.path, titleOnlyPaths)) {
 					await idx.upsertDocument(file.path, file.basename, 'txt');
 				} else {
 					const content = await this.readFileText(vault, file);

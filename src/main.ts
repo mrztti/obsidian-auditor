@@ -4,6 +4,8 @@ import { AuditorSettings, DEFAULT_SETTINGS, AuditorSettingTab } from './settings
 import { ModelLoadProgress, VaultIndexer } from './indexer';
 import { SearchView, SEARCH_VIEW_TYPE } from './searchView';
 import { SectionView, SECTION_VIEW_TYPE, FRONTMATTER_KEY, FRONTMATTER_VALUE } from './sectionView';
+import { GraphView, GRAPH_VIEW_TYPE } from './graphView';
+import { GraphCanvasView, GRAPH_CANVAS_VIEW_TYPE, type GraphNodeDef, type GraphEdgeDef } from './graphCanvasView';
 import { buildSkeleton } from './sections';
 import { NewFindingModal } from './newFindingModal';
 
@@ -30,6 +32,8 @@ export default class AuditorPlugin extends Plugin {
 
 		this.registerView(SEARCH_VIEW_TYPE, (leaf) => new SearchView(leaf, this));
 		this.registerView(SECTION_VIEW_TYPE, (leaf) => new SectionView(leaf, this));
+		this.registerView(GRAPH_VIEW_TYPE, (leaf) => new GraphView(leaf, this));
+		this.registerView(GRAPH_CANVAS_VIEW_TYPE, (leaf) => new GraphCanvasView(leaf, this));
 
 		this.addRibbonIcon('search', 'Open vault search', () => {
 			void this.activateSearchView();
@@ -38,6 +42,10 @@ export default class AuditorPlugin extends Plugin {
 		this.addRibbonIcon('list-tree', 'Open as audit finding', () => {
 			const file = this.app.workspace.getActiveFile();
 			if (file && file.extension === 'md') void this.maybeReplaceWithSectionView(file, true);
+		});
+
+		this.addRibbonIcon('share-2', 'Open phrase graph', () => {
+			void this.activateGraphView();
 		});
 
 		this.registerEvent(this.app.workspace.on('file-open', (file) => {
@@ -77,6 +85,12 @@ export default class AuditorPlugin extends Plugin {
 				}
 				return true;
 			},
+		});
+
+		this.addCommand({
+			id: 'open-phrase-graph',
+			name: 'Open phrase graph',
+			callback: () => { void this.activateGraphView(); },
 		});
 
 		this.addCommand({
@@ -148,6 +162,10 @@ export default class AuditorPlugin extends Plugin {
 		notice.noticeEl.addEventListener('click', () => { this.indexer.cancelIndexing(); });
 		try {
 			let cancelled = false;
+			const titleOnlyPaths = this.settings.titleOnlyPaths
+				.split('\n')
+				.map((p) => p.trim())
+				.filter((p) => p.length > 0);
 			await this.indexer.indexVaultFolder(
 				this.app.vault,
 				this.settings.indexFolder,
@@ -157,6 +175,7 @@ export default class AuditorPlugin extends Plugin {
 					const suffix = cancelled ? '' : ' (click to cancel)';
 					notice.setMessage(`Auditor: ${label} (${done}/${total} — ${pct}%)${suffix}`);
 				},
+				titleOnlyPaths,
 			);
 			notice.setMessage(cancelled ? 'Auditor: indexing cancelled.' : 'Auditor: indexing complete!');
 			log('runIndexing: complete', { cancelled });
@@ -178,6 +197,32 @@ export default class AuditorPlugin extends Plugin {
 		const leaf = this.app.workspace.getRightLeaf(false);
 		if (!leaf) return;
 		await leaf.setViewState({ type: SEARCH_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Opens (or reuses) the main-area force-graph view and feeds it the given graph. */
+	async openGraphCanvas(nodes: GraphNodeDef[], edges: GraphEdgeDef[]): Promise<void> {
+		let leaf = this.app.workspace.getLeavesOfType(GRAPH_CANVAS_VIEW_TYPE)[0];
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf('tab');
+			await leaf.setViewState({ type: GRAPH_CANVAS_VIEW_TYPE, active: true });
+		} else {
+			void this.app.workspace.revealLeaf(leaf);
+		}
+		const view = leaf.view;
+		if (view instanceof GraphCanvasView) view.setGraphData(nodes, edges);
+	}
+
+	private async activateGraphView(): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(GRAPH_VIEW_TYPE);
+		const existing = leaves[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getLeftLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: GRAPH_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
 	}
 
