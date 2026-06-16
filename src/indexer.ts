@@ -72,6 +72,8 @@ export class VaultIndexer {
 	private chunkSize: number;
 	private indexPromise: Promise<LocalDocumentIndex> | null = null;
 	private onModelProgress?: (progress: ModelLoadProgress) => void;
+	private cancelRequested = false;
+	private indexingInProgress = false;
 
 	/**
 	 * @param indexRootFolder Absolute path to a folder (inside the plugin's own
@@ -128,6 +130,18 @@ export class VaultIndexer {
 	/** No-op — index is created lazily on first indexVaultFolder or search call. */
 	async initialize(): Promise<void> {}
 
+	get isIndexing(): boolean {
+		return this.indexingInProgress;
+	}
+
+	/** Requests that an in-progress indexVaultFolder stop after its current file. */
+	cancelIndexing(): void {
+		if (this.indexingInProgress) {
+			log('cancelIndexing: cancellation requested');
+			this.cancelRequested = true;
+		}
+	}
+
 	async indexVaultFolder(
 		vault: Vault,
 		folderPath: string,
@@ -151,16 +165,30 @@ export class VaultIndexer {
 			pdf: files.filter((f) => f.extension === 'pdf').length,
 		});
 
+		this.cancelRequested = false;
+		this.indexingInProgress = true;
+		try {
 		for (let i = 0; i < files.length; i++) {
+			if (this.cancelRequested) {
+				log('indexVaultFolder: cancelled', { done: i, total: files.length });
+				onProgress?.(i, files.length, 'Cancelled');
+				break;
+			}
 			const file = files[i]!;
 			log('indexVaultFolder: indexing file', file.path);
 			onProgress?.(i, files.length, `Indexing ${file.basename}…`);
 			try {
-				const content = await this.readFileText(vault, file);
-				if (content.trim().length > 0) {
-					await idx.upsertDocument(file.path, content, 'txt');
+				// Files prefixed with "_" are ingested by title only — their
+				// content is intentionally never embedded.
+				if (file.basename.startsWith('_')) {
+					await idx.upsertDocument(file.path, file.basename, 'txt');
 				} else {
-					log('indexVaultFolder: skipping empty/unreadable file', file.path);
+					const content = await this.readFileText(vault, file);
+					// Every document must end up in the index, even with empty/
+					// unreadable content — fall back to indexing just the title
+					// rather than skipping it outright.
+					const text = content.trim().length > 0 ? content : file.basename;
+					await idx.upsertDocument(file.path, text, 'txt');
 				}
 			} catch (e) {
 				console.error('[Auditor] failed to index', file.path, e);
@@ -169,6 +197,10 @@ export class VaultIndexer {
 			// Hand the main thread back to the UI so the progress bar repaints
 			// between documents instead of freezing for the whole batch.
 			await yieldToUI();
+		}
+		} finally {
+			this.indexingInProgress = false;
+			this.cancelRequested = false;
 		}
 		log('indexVaultFolder: complete');
 	}

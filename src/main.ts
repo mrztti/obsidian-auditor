@@ -57,6 +57,16 @@ export default class AuditorPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'cancel-indexing',
+			name: 'Cancel indexing',
+			checkCallback: (checking) => {
+				if (!this.indexer.isIndexing) return false;
+				if (!checking) this.indexer.cancelIndexing();
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: 'open-audit-sections',
 			name: 'Open as audit sections',
 			checkCallback: (checking) => {
@@ -124,19 +134,32 @@ export default class AuditorPlugin extends Plugin {
 	}
 
 	async runIndexing(): Promise<void> {
+		if (this.indexer.isIndexing) {
+			new Notice('Auditor: indexing already in progress.');
+			return;
+		}
 		log('runIndexing: starting', { indexFolder: this.settings.indexFolder });
-		const notice = new Notice('Auditor: indexing… 0%', 0);
+		const notice = new Notice('Auditor: indexing… 0% (click to cancel)', 0);
+		// `messageEl` needs Obsidian 1.8.7+; this plugin's minAppVersion is 1.7.2, so we
+		// stick with the older (deprecated but still functional) `noticeEl`.
+		// eslint-disable-next-line @typescript-eslint/no-deprecated
+		notice.noticeEl.addClass('auditor-cancellable-notice');
+		// eslint-disable-next-line @typescript-eslint/no-deprecated
+		notice.noticeEl.addEventListener('click', () => { this.indexer.cancelIndexing(); });
 		try {
+			let cancelled = false;
 			await this.indexer.indexVaultFolder(
 				this.app.vault,
 				this.settings.indexFolder,
 				(done, total, label) => {
+					if (label === 'Cancelled') cancelled = true;
 					const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-					notice.setMessage(`Auditor: ${label} (${done}/${total} — ${pct}%)`);
+					const suffix = cancelled ? '' : ' (click to cancel)';
+					notice.setMessage(`Auditor: ${label} (${done}/${total} — ${pct}%)${suffix}`);
 				},
 			);
-			notice.setMessage('Auditor: indexing complete!');
-			log('runIndexing: complete');
+			notice.setMessage(cancelled ? 'Auditor: indexing cancelled.' : 'Auditor: indexing complete!');
+			log('runIndexing: complete', { cancelled });
 			window.setTimeout(() => notice.hide(), 3000);
 		} catch (e) {
 			notice.hide();
