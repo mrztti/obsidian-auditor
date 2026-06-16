@@ -195,7 +195,10 @@ export default class AuditorPlugin extends Plugin {
 
 	/** Creates a new note flagged with our frontmatter type and the empty 4-section skeleton. */
 	private async createFindingNote(title: string): Promise<void> {
-		const path = normalizePath(`${title}.md`);
+		// Strip path separators and traversal segments so a typo'd title (e.g. containing
+		// "../") can never write outside the vault via vault.create().
+		const safeTitle = title.replace(/[/\\]/g, '-').replace(/\.\.+/g, '.');
+		const path = normalizePath(`${safeTitle}.md`);
 		const content = `---\n${FRONTMATTER_KEY}: ${FRONTMATTER_VALUE}\n---\n\n${buildSkeleton()}`;
 		const file = await this.app.vault.create(path, content);
 		await this.app.workspace.getLeaf(false).openFile(file);
