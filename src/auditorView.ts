@@ -314,15 +314,30 @@ export class AuditorView extends ItemView {
 		const wrapper = container.createDiv('auditor-reindex-item');
 		const btn = wrapper.createEl('button', { text: label, cls: 'mod-muted' });
 		const status = wrapper.createDiv('auditor-reindex-status');
+		const activeList = wrapper.createDiv('auditor-active-files');
+
+		const renderActiveFiles = (activePaths: string[]) => {
+			activeList.empty();
+			for (const path of activePaths) {
+				const row = activeList.createDiv('auditor-active-file-row');
+				row.createDiv('auditor-spinner');
+				row.createSpan({ text: path, cls: 'auditor-active-file-path' });
+			}
+		};
 
 		btn.addEventListener('click', () => {
 			void (async () => {
 				btn.disabled = true;
 				status.setText('Starting…');
-				const summary = await this.plugin.runIndexing(kind, (done, total, indexLabel) => {
-					status.setText(`${indexLabel} (${done}/${total})`);
-				});
+				const summary = await this.plugin.runIndexing(
+					kind,
+					(done, total, indexLabel) => {
+						status.setText(`${indexLabel} (${done}/${total})`);
+					},
+					renderActiveFiles,
+				);
 				btn.disabled = false;
+				renderActiveFiles([]);
 				status.setText(summary ? this.formatSummary(summary) : 'Indexing failed — see notice.');
 			})();
 		});

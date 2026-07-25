@@ -4,6 +4,7 @@ import { LocalDocumentIndex, type EmbeddingsModel } from 'vectra/browser';
 import { LocalFileStorage } from 'vectra/node';
 import { Vault, type TFile } from 'obsidian';
 import { chunkMarkdown, chunkPdfPages } from './chunker';
+import { CachingEmbeddings } from './embeddingsCache';
 
 const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf', 'docx']);
 
@@ -86,18 +87,35 @@ function hashText(text: string): string {
  */
 export class AuditVectorStore {
 	private storage: LocalFileStorage;
-	private embeddings: EmbeddingsModel;
+	/** Wraps the real embeddings model so chunk embeddings can be prewarmed concurrently across files, ahead of the serialized index-commit section — see `CachingEmbeddings`. */
+	private embeddings: CachingEmbeddings;
 	private chunkWords: number;
+	private maxConcurrentFiles: number;
 	private indexPromise: Promise<LocalDocumentIndex> | null = null;
 	private manifest: Manifest | null = null;
 	private errors: ErrorMap | null = null;
 	private cancelRequested = false;
 	private indexingInProgress = false;
+	/** Serializes manifest/error persistence so concurrent file workers don't race overlapping disk writes. */
+	private persistQueue: Promise<void> = Promise.resolve();
+	/**
+	 * vectra's `LocalDocumentIndex` maintains a single internal begin/end-update transaction — it is
+	 * not safe for two concurrent callers to have one open at once (`upsertDocument`/`deleteDocument`
+	 * throw "Update already in progress" if they overlap). File reading/chunking still runs
+	 * concurrently across the worker pool, but every actual index mutation is funneled through this
+	 * one queue, so exactly one file at a time ever holds the index's update transaction.
+	 */
+	private indexMutationQueue: Promise<void> = Promise.resolve();
 
-	constructor(embeddings: EmbeddingsModel, indexRootFolder: string, chunkWords = 300) {
+	constructor(embeddings: EmbeddingsModel, indexRootFolder: string, chunkWords = 300, maxConcurrentFiles = 10) {
 		this.storage = new LocalFileStorage(indexRootFolder);
-		this.embeddings = embeddings;
+		this.embeddings = new CachingEmbeddings(embeddings);
 		this.chunkWords = chunkWords;
+		this.maxConcurrentFiles = maxConcurrentFiles;
+	}
+
+	setMaxConcurrentFiles(n: number): void {
+		this.maxConcurrentFiles = n;
 	}
 
 	get isIndexing(): boolean {
@@ -156,12 +174,27 @@ export class AuditVectorStore {
 		await this.storage.upsertFile('errors.json', JSON.stringify(this.errors ?? {}));
 	}
 
+	/** Queues a manifest+errors save after the in-flight one, so concurrent file workers never overlap disk writes. */
+	private persist(): Promise<void> {
+		this.persistQueue = this.persistQueue.then(() => Promise.all([this.saveManifest(), this.saveErrors()])).then(() => {});
+		return this.persistQueue;
+	}
+
+	/** Runs `fn` only once every prior queued mutation has fully settled — the single controller serializing all index begin/end-update transactions across concurrent file workers. */
+	private withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+		const run = this.indexMutationQueue.then(fn, fn);
+		this.indexMutationQueue = run.then(() => undefined, () => undefined);
+		return run;
+	}
+
 	async indexFolder(
 		vault: Vault,
 		folderPath: string,
 		onProgress?: (done: number, total: number, label: string) => void,
+		onActiveFilesChange?: (activePaths: string[]) => void,
 	): Promise<IndexSummary> {
 		log('indexFolder: starting', { folderPath });
+		this.embeddings.clear();
 		const idx = await this.getIndex();
 		const manifest = await this.loadManifest();
 		const errors = await this.loadErrors();
@@ -198,15 +231,18 @@ export class AuditVectorStore {
 
 		this.cancelRequested = false;
 		this.indexingInProgress = true;
-		try {
-			for (let i = 0; i < files.length; i++) {
-				if (this.cancelRequested) {
-					summary.cancelled = true;
-					onProgress?.(i, files.length, 'Cancelled');
-					break;
-				}
+		const activeFiles = new Set<string>();
+		const notifyActive = () => onActiveFilesChange?.(Array.from(activeFiles));
+		let cursor = 0;
+		let doneCount = 0;
+
+		const worker = async (): Promise<void> => {
+			while (!this.cancelRequested) {
+				const i = cursor++;
+				if (i >= files.length) return;
 				const file = files[i]!;
-				onProgress?.(i, files.length, `Indexing ${file.basename}…`);
+				activeFiles.add(file.path);
+				notifyActive();
 				try {
 					const status = await this.indexFile(idx, vault, file, manifest, errors);
 					if (status === 'indexed') summary.indexed++;
@@ -217,14 +253,27 @@ export class AuditVectorStore {
 					errors[file.path] = String(e);
 					summary.skippedUnreadable++;
 				}
-				onProgress?.(i + 1, files.length, `Done ${file.basename}`);
-				await this.saveManifest();
-				await this.saveErrors();
+				activeFiles.delete(file.path);
+				doneCount++;
+				notifyActive();
+				onProgress?.(doneCount, files.length, `Done ${file.basename}`);
+				await this.persist();
 				await yieldToUI();
+			}
+		};
+
+		try {
+			const workerCount = Math.max(1, Math.min(this.maxConcurrentFiles, files.length));
+			await Promise.all(Array.from({ length: workerCount }, worker));
+			if (this.cancelRequested) {
+				summary.cancelled = true;
+				onProgress?.(doneCount, files.length, 'Cancelled');
 			}
 		} finally {
 			this.indexingInProgress = false;
 			this.cancelRequested = false;
+			activeFiles.clear();
+			notifyActive();
 		}
 		log('indexFolder: complete', summary);
 		return summary;
@@ -277,23 +326,36 @@ export class AuditVectorStore {
 			return 'unreadable';
 		}
 
-		if (previous) {
-			for (const uri of previous.chunkUris) await idx.deleteDocument(uri);
-		}
+		// The actual network cost — the embedding calls — happens here, still fully concurrent with
+		// other files' prewarms (bounded only by GeminiEmbeddings' own worker pool + the shared rate
+		// limiter). This populates the cache so the locked section below, which vectra requires to be
+		// single-file-at-a-time, hits it instantly instead of making its own (serialized) network call.
+		await Promise.all(chunks.map((chunk) => this.embeddings.prewarm(chunk.text)));
 
-		const chunkUris: string[] = [];
-		for (let i = 0; i < chunks.length; i++) {
-			const chunk = chunks[i]!;
-			const uri = chunk.page !== undefined
-				? `${file.path}#p${chunk.page}#c${i}`
-				: `${file.path}#L${chunk.line}`;
-			await idx.upsertDocument(uri, chunk.text, 'txt', {
-				sourcePath: file.path,
-				...(chunk.page !== undefined ? { page: chunk.page } : {}),
-				...(chunk.line !== undefined ? { line: chunk.line } : {}),
-			});
-			chunkUris.push(uri);
-		}
+		// vectra's index only tolerates one begin/end-update transaction in flight at a time, so the
+		// actual delete+upsert calls (each of which opens one internally) are serialized here — see
+		// `withIndexLock`. Everything above this point (reading, hashing, chunking, embedding) already
+		// ran concurrently with other files; only this fast bookkeeping/commit section is
+		// single-file-at-a-time.
+		const chunkUris = await this.withIndexLock(async () => {
+			if (previous) {
+				for (const uri of previous.chunkUris) await idx.deleteDocument(uri);
+			}
+			const uris: string[] = [];
+			for (let i = 0; i < chunks.length; i++) {
+				const chunk = chunks[i]!;
+				const uri = chunk.page !== undefined
+					? `${file.path}#p${chunk.page}#c${i}`
+					: `${file.path}#L${chunk.line}`;
+				await idx.upsertDocument(uri, chunk.text, 'txt', {
+					sourcePath: file.path,
+					...(chunk.page !== undefined ? { page: chunk.page } : {}),
+					...(chunk.line !== undefined ? { line: chunk.line } : {}),
+				});
+				uris.push(uri);
+			}
+			return uris;
+		});
 
 		manifest[file.path] = { hash, chunkUris };
 		delete errors[file.path];

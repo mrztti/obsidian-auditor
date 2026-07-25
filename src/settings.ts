@@ -21,6 +21,8 @@ export interface AuditorSettings {
 	maxRequestsPerSecond: number;
 	/** When enabled, indexing starts at a slow request rate and ramps up to the ceiling over ~30s instead of starting at full speed. */
 	gradualRampUp: boolean;
+	/** Maximum number of files indexed concurrently within a single store (standards/evidence/written-controls each apply this independently). */
+	maxConcurrentIndexing: number;
 }
 
 const DEFAULT_WRITING_RULES = `RULE 1
@@ -66,6 +68,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	defaultWritingRules: DEFAULT_WRITING_RULES,
 	maxRequestsPerSecond: 5,
 	gradualRampUp: true,
+	maxConcurrentIndexing: 10,
 };
 
 export class AuditorSettingTab extends PluginSettingTab {
@@ -232,6 +235,21 @@ export class AuditorSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.gradualRampUp = value;
 						this.plugin.rateLimiter.updateConfig(this.plugin.settings.maxRequestsPerSecond, value);
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Max concurrent files')
+			.setDesc('How many files can be indexed at the same time, within a single store (standards/evidence/written-controls each apply this independently).')
+			.addSlider((slider) =>
+				slider
+					.setLimits(1, 30, 1)
+					.setValue(this.plugin.settings.maxConcurrentIndexing)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.maxConcurrentIndexing = value;
+						this.plugin.updateIndexingConcurrency();
 						await this.plugin.saveSettings();
 					}),
 			);

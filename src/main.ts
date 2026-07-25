@@ -49,16 +49,19 @@ export default class AuditorPlugin extends Plugin {
 			embeddings,
 			`${dataRoot}/vector-index/standards`,
 			this.settings.chunkWords,
+			this.settings.maxConcurrentIndexing,
 		);
 		this.evidenceIndex = new AuditVectorStore(
 			embeddings,
 			`${dataRoot}/vector-index/evidence`,
 			this.settings.chunkWords,
+			this.settings.maxConcurrentIndexing,
 		);
 		this.writtenControlsIndex = new AuditVectorStore(
 			embeddings,
 			`${dataRoot}/vector-index/written-controls`,
 			this.settings.chunkWords,
+			this.settings.maxConcurrentIndexing,
 		);
 
 		this.fileExplorerDecorator = new FileExplorerDecorator(this);
@@ -168,6 +171,13 @@ export default class AuditorPlugin extends Plugin {
 		return this.writtenControlsIndex;
 	}
 
+	/** Applies the current `maxConcurrentIndexing` setting to all three stores; called whenever the setting changes. */
+	updateIndexingConcurrency(): void {
+		for (const kind of ['standards', 'evidence', 'writtenControls'] as StoreKind[]) {
+			this.storeFor(kind).setMaxConcurrentFiles(this.settings.maxConcurrentIndexing);
+		}
+	}
+
 	private folderFor(kind: StoreKind): string {
 		if (kind === 'standards') return this.settings.standardsFolder;
 		if (kind === 'evidence') return this.settings.evidenceFolder;
@@ -187,6 +197,7 @@ export default class AuditorPlugin extends Plugin {
 	async runIndexing(
 		kind: StoreKind,
 		onProgress?: (done: number, total: number, label: string) => void,
+		onActiveFilesChange?: (activePaths: string[]) => void,
 	): Promise<IndexSummary | null> {
 		const store = this.storeFor(kind);
 		const label = this.labelFor(kind);
@@ -218,10 +229,11 @@ export default class AuditorPlugin extends Plugin {
 					const suffix =
 						indexLabel === 'Cancelled' ? '' : ' (click to cancel)';
 					notice.setMessage(
-						`Auditor: ${label} — ${indexLabel} (${done}/${total} — ${pct}%)${suffix}`,
+						`Auditor: ${label} — (${done}/${total} — ${pct}%)${suffix}`,
 					);
 					onProgress?.(done, total, indexLabel);
 				},
+				(activePaths) => { onActiveFilesChange?.(activePaths); },
 			);
 			notice.setMessage(
 				summary.cancelled
