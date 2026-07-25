@@ -10,41 +10,12 @@ import { GeminiGenerate } from './geminiGenerate';
 import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
 import { FileExplorerDecorator } from './fileExplorerDecorator';
 import { AddControlModal } from './addControlModal';
+import { RateLimiter } from './rateLimiter';
+import { buildControlNoteContent, sanitizeFileTitle, type ControlRecord } from './controlNote';
 
 const log = (...args: unknown[]) => console.debug('[Auditor]', ...args);
 
 export type StoreKind = 'standards' | 'evidence' | 'writtenControls';
-
-/**
- * Turns a free-text control description (often long and multi-line) into a safe, short note
- * title: only the first line is used (avoiding embedded newlines entirely), every character
- * Obsidian forbids in filenames is stripped, and trailing dots/spaces (which Windows also
- * rejects) and path-traversal sequences are removed, then the result is length-capped.
- */
-function sanitizeFileTitle(title: string, maxLength = 80): string {
-	const firstLine = title.split(/\r?\n/)[0] ?? '';
-	const cleaned = firstLine
-		.replace(/[\\/:*?"<>|]/g, '-')
-		.replace(/\.\.+/g, '.')
-		.trim()
-		.slice(0, maxLength)
-		.replace(/[\s.]+$/, '')
-		.trim();
-	return cleaned || 'Untitled control';
-}
-
-/** The one canonical markdown shape every control note is saved in, everywhere in the plugin. */
-function buildControlNoteContent(requirement: string, conclusion: string): string {
-	return [
-		'## Control',
-		'',
-		requirement,
-		'',
-		'## Control report',
-		'',
-		conclusion,
-	].join('\n');
-}
 
 export default class AuditorPlugin extends Plugin {
 	settings!: AuditorSettings;
@@ -53,14 +24,20 @@ export default class AuditorPlugin extends Plugin {
 	writtenControlsIndex!: AuditVectorStore;
 	geminiGenerate!: GeminiGenerate;
 	fileExplorerDecorator!: FileExplorerDecorator;
+	rateLimiter!: RateLimiter;
 
 	async onload() {
 		log('onload: plugin loading');
 		await this.loadSettings();
 
+		this.rateLimiter = new RateLimiter(
+			this.settings.maxRequestsPerSecond,
+			this.settings.gradualRampUp,
+		);
 		const embeddings = new GeminiEmbeddings(
 			this.settings.geminiApiKey,
 			this.settings.embeddingModel,
+			this.rateLimiter,
 		);
 		this.geminiGenerate = new GeminiGenerate(
 			this.settings.geminiApiKey,
@@ -119,8 +96,8 @@ export default class AuditorPlugin extends Plugin {
 		});
 
 		this.addRibbonIcon('file-plus', 'Add control', () => {
-			new AddControlModal(this.app, (title, requirement, conclusion) => {
-				void this.saveControlNote(title, requirement, conclusion);
+			new AddControlModal(this.app, (record) => {
+				void this.saveControlNote(record);
 			}).open();
 		});
 
@@ -136,8 +113,8 @@ export default class AuditorPlugin extends Plugin {
 			id: 'add-control',
 			name: 'Add control',
 			callback: () => {
-				new AddControlModal(this.app, (title, requirement, conclusion) => {
-					void this.saveControlNote(title, requirement, conclusion);
+				new AddControlModal(this.app, (record) => {
+					void this.saveControlNote(record);
 				}).open();
 			},
 		});
@@ -218,6 +195,7 @@ export default class AuditorPlugin extends Plugin {
 			return null;
 		}
 		log('runIndexing: starting', { kind, folder: this.folderFor(kind) });
+		this.rateLimiter.reset();
 		const notice = new Notice(
 			`Auditor: indexing ${label}… 0% (click to cancel)`,
 			0,
@@ -274,21 +252,48 @@ export default class AuditorPlugin extends Plugin {
 	}
 
 	/**
-	 * Creates a new note in the written-controls folder, in the canonical Control/Control report
-	 * format, then re-indexes that folder so the new control is immediately searchable. `title` is
-	 * the requirement's own nomenclature (e.g. "ETSI TS 119 431-1 SIG-6.3.1-03"), used as the
-	 * filename; falls back to deriving one from `requirement` when not given.
+	 * Creates a new note in the written-controls folder, in the canonical control-record format,
+	 * then re-indexes that folder so the new control is immediately searchable. The note's filename
+	 * is the audit template number (`record.number`).
 	 */
-	async saveControlNote(title: string, requirement: string, conclusion: string): Promise<void> {
+	async saveControlNote(record: ControlRecord): Promise<void> {
 		const folder = this.settings.writtenControlsFolder;
-		const safeTitle = sanitizeFileTitle(title || requirement);
+		const safeNumber = sanitizeFileTitle(record.number || 'Untitled control');
 		const path = normalizePath(
-			folder ? `${folder}/${safeTitle}.md` : `${safeTitle}.md`,
+			folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`,
 		);
-		const content = buildControlNoteContent(requirement, conclusion);
+		const content = buildControlNoteContent(record);
 		const file = await this.app.vault.create(path, content);
 		await this.app.workspace.getLeaf(false).openFile(file);
 		void this.runIndexing('writtenControls');
+	}
+
+	/**
+	 * Writes many control records in one go (used by the Excel import feature): unlike
+	 * `saveControlNote`, this does not open each note and only re-indexes the written-controls
+	 * folder once at the end. Filenames that collide with an existing note get a numeric suffix.
+	 */
+	async importControlRecords(records: ControlRecord[]): Promise<{ written: number; failed: { record: ControlRecord; error: string }[] }> {
+		const folder = this.settings.writtenControlsFolder;
+		const failed: { record: ControlRecord; error: string }[] = [];
+		let written = 0;
+		for (const record of records) {
+			try {
+				const base = sanitizeFileTitle(record.number || 'Untitled control');
+				let safeNumber = base;
+				let suffix = 1;
+				while (this.app.vault.getAbstractFileByPath(normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`))) {
+					safeNumber = `${base}-${++suffix}`;
+				}
+				const path = normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
+				await this.app.vault.create(path, buildControlNoteContent(record));
+				written++;
+			} catch (e) {
+				failed.push({ record, error: String(e) });
+			}
+		}
+		if (written > 0) void this.runIndexing('writtenControls');
+		return { written, failed };
 	}
 
 	async loadSettings() {

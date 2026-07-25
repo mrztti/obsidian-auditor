@@ -1,4 +1,8 @@
 import { GoogleGenAI, Type, type Schema } from '@google/genai';
+import { CONTROL_FIELD_KEYS, type ControlFieldKey } from './controlNote';
+
+/** Cheap model used for the Excel import feature's column-mapping step — never the user's configured generation model, to keep imports cost-efficient. */
+export const IMPORT_MODEL = 'gemini-3.1-flash-lite';
 
 export interface RerankedSnippet {
 	index: number;
@@ -52,44 +56,76 @@ const CONTROL_ANALYSIS_SCHEMA: Schema = {
 	properties: {
 		selected: {
 			type: Type.ARRAY,
-			description: 'The snippets (by index) most relevant to understanding this control, most relevant first.',
+			description:
+				'The snippets (by index) most relevant to understanding this control, most relevant first.',
 			items: {
 				type: Type.OBJECT,
 				properties: {
-					index: { type: Type.INTEGER, description: 'The [index] of the relevant snippet.' },
+					index: {
+						type: Type.INTEGER,
+						description: 'The [index] of the relevant snippet.',
+					},
 					controlNumber: {
 						type: Type.STRING,
-						description: 'The exact clause/control nomenclature as it appears in the standard (e.g. "6.2.1", "REQ-14"). Empty string if none.',
+						description:
+							'The exact clause/control nomenclature as it appears in the standard (e.g. "6.2.1", "REQ-14"). Empty string if none.',
 					},
-					excerpt: { type: Type.STRING, description: 'The exact verbatim excerpt from the snippet defining the control.' },
-					reason: { type: Type.STRING, description: 'One sentence on why this snippet matters for understanding the control.' },
+					excerpt: {
+						type: Type.STRING,
+						description:
+							'The exact verbatim excerpt from the snippet defining the control.',
+					},
+					reason: {
+						type: Type.STRING,
+						description:
+							'One sentence on why this snippet matters for understanding the control.',
+					},
 				},
 				required: ['index', 'controlNumber', 'excerpt', 'reason'],
 			},
 		},
 		references: {
 			type: Type.ARRAY,
-			description: 'Any mentions, within the provided snippets, of OTHER standards being referenced/cited (e.g. "see ISO 27001 clause 5.3").',
+			description:
+				'Any mentions, within the provided snippets, of OTHER standards being referenced/cited (e.g. "see ISO 27001 clause 5.3").',
 			items: {
 				type: Type.OBJECT,
 				properties: {
-					standardName: { type: Type.STRING, description: 'Name of the other standard referenced, as it appears in the text.' },
-					controlNumber: { type: Type.STRING, description: 'Clause/control number within that standard, if given. Empty string if none.' },
-					excerpt: { type: Type.STRING, description: 'The exact verbatim excerpt containing the reference.' },
+					standardName: {
+						type: Type.STRING,
+						description:
+							'Name of the other standard referenced, as it appears in the text.',
+					},
+					controlNumber: {
+						type: Type.STRING,
+						description:
+							'Clause/control number within that standard, if given. Empty string if none.',
+					},
+					excerpt: {
+						type: Type.STRING,
+						description:
+							'The exact verbatim excerpt containing the reference.',
+					},
 				},
 				required: ['standardName', 'controlNumber', 'excerpt'],
 			},
 		},
 		targetDocuments: {
 			type: Type.ARRAY,
-			description: 'A comprehensive list of the kinds of evidence documents that will need to be inspected to verify this control.',
+			description:
+				'A comprehensive list of the kinds of evidence documents that will need to be inspected to verify this control.',
 			items: {
 				type: Type.OBJECT,
 				properties: {
-					file: { type: Type.STRING, description: 'Descriptive name/topic of the document to look for, e.g. "Cryptographic Policy".' },
+					file: {
+						type: Type.STRING,
+						description:
+							'Descriptive name/topic of the document to look for, e.g. "Cryptographic Policy".',
+					},
 					keywords: {
 						type: Type.ARRAY,
-						description: 'Keywords and synonyms for this document, suited for embedding-based semantic search.',
+						description:
+							'Keywords and synonyms for this document, suited for embedding-based semantic search.',
 						items: { type: Type.STRING },
 					},
 				},
@@ -98,7 +134,8 @@ const CONTROL_ANALYSIS_SCHEMA: Schema = {
 		},
 		memorySummary: {
 			type: Type.STRING,
-			description: 'A concise summary of the exact document requirements that must be verified with evidence in later steps.',
+			description:
+				'A concise summary of the exact document requirements that must be verified with evidence in later steps.',
 		},
 	},
 	required: ['selected', 'references', 'targetDocuments', 'memorySummary'],
@@ -115,15 +152,21 @@ export interface ResearchAssessment {
 const RESEARCH_ASSESSMENT_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
-		progress: { type: Type.STRING, description: 'A narrative summary of what has been verified so far against the requirements.' },
+		progress: {
+			type: Type.STRING,
+			description:
+				'A narrative summary of what has been verified so far against the requirements.',
+		},
 		gaps: {
 			type: Type.ARRAY,
-			description: 'The requirements that are still missing evidence, listed concretely.',
+			description:
+				'The requirements that are still missing evidence, listed concretely.',
 			items: { type: Type.STRING },
 		},
 		updatedMemory: {
 			type: Type.STRING,
-			description: 'An updated version of the requirements memory, reflecting what is now verified and what remains outstanding.',
+			description:
+				'An updated version of the requirements memory, reflecting what is now verified and what remains outstanding.',
 		},
 	},
 	required: ['progress', 'gaps', 'updatedMemory'],
@@ -145,14 +188,19 @@ const FINALIZATION_SCHEMA: Schema = {
 	properties: {
 		items: {
 			type: Type.ARRAY,
-			description: 'ONLY the documents/controls (by index) that are actually relevant enough to cite in the report. Omit every index that is not genuinely relevant — do not include an entry for every input.',
+			description:
+				'ONLY the documents/controls (by index) that are actually relevant enough to cite in the report. Omit every index that is not genuinely relevant — do not include an entry for every input.',
 			items: {
 				type: Type.OBJECT,
 				properties: {
-					index: { type: Type.INTEGER, description: 'The [index] of the document/control.' },
+					index: {
+						type: Type.INTEGER,
+						description: 'The [index] of the document/control.',
+					},
 					plannedFinding: {
 						type: Type.STRING,
-						description: 'A concise statement of what finding or content will be drawn from this document/control when drafting the report.',
+						description:
+							'A concise statement of what finding or content will be drawn from this document/control when drafting the report.',
 					},
 				},
 				required: ['index', 'plannedFinding'],
@@ -164,25 +212,51 @@ const FINALIZATION_SCHEMA: Schema = {
 
 export interface DraftedControl {
 	thinking: string;
-	/** Standard name + requirement identifier code, e.g. "ETSI TS 119 431-1 SIG-6.3.1-03". */
-	title: string;
-	/** The control report body, following the writing rules exactly (Findings/Observations-Recommendations/Evidence). */
-	conclusion: string;
+	standard: string;
+	topic: string;
+	todFinding: string;
+	todRecommendation: string;
+	/** C = conform, C* = conform but with observation, NC = non-conform with recommendation. */
+	todRating: 'C' | 'C*' | 'NC';
 }
 
 const DRAFT_CONTROL_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
-		title: {
+		standard: {
 			type: Type.STRING,
-			description: 'The standard name followed by the requirement\'s short identifier code, e.g. "ETSI TS 119 431-1 SIG-6.3.1-03". Just the nomenclature, nothing else.',
+			description:
+				'Name of the standard this control/requirement comes from, e.g. "ETSI TS 119 431-1".',
 		},
-		conclusion: {
+		topic: {
 			type: Type.STRING,
-			description: 'The control report body, following the writing rules exactly. Nothing except what the rules produce.',
+			description:
+				'A short topic label for this control, e.g. "Device Management".',
+		},
+		todFinding: {
+			type: Type.STRING,
+			description:
+				'The Test of Design finding, following the writing rules exactly. Nothing except what the rules produce.',
+		},
+		todRecommendation: {
+			type: Type.STRING,
+			description:
+				'The Test of Design recommendation, following the writing rules exactly. Empty string if the rating is "C" (fully conform, nothing to recommend).',
+		},
+		todRating: {
+			type: Type.STRING,
+			enum: ['C', 'C*', 'NC'],
+			description:
+				'C = conform, no issues. C* = conform but with an observation/minor note. NC = non-conform, a recommendation is required.',
 		},
 	},
-	required: ['title', 'conclusion'],
+	required: [
+		'standard',
+		'topic',
+		'todFinding',
+		'todRecommendation',
+		'todRating',
+	],
 };
 
 const RERANK_SCHEMA: Schema = {
@@ -190,20 +264,30 @@ const RERANK_SCHEMA: Schema = {
 	properties: {
 		response: {
 			type: Type.STRING,
-			description: 'A formal, direct answer to the user\'s query, synthesized from the relevant snippets. Presented to the user before the snippets themselves.',
+			description:
+				"A formal, direct answer to the user's query, synthesized from the relevant snippets. Presented to the user before the snippets themselves.",
 		},
 		relevant: {
 			type: Type.ARRAY,
-			description: 'The snippets (by index) that are actually relevant to the query, most relevant first.',
+			description:
+				'The snippets (by index) that are actually relevant to the query, most relevant first.',
 			items: {
 				type: Type.OBJECT,
 				properties: {
-					index: { type: Type.INTEGER, description: 'The [index] of the relevant snippet.' },
+					index: {
+						type: Type.INTEGER,
+						description: 'The [index] of the relevant snippet.',
+					},
 					excerpt: {
 						type: Type.STRING,
-						description: 'The exact verbatim text copied from within the snippet that is most relevant to the query — not a summary or paraphrase, an exact substring of the snippet.',
+						description:
+							'The exact verbatim text copied from within the snippet that is most relevant to the query — not a summary or paraphrase, an exact substring of the snippet.',
 					},
-					reason: { type: Type.STRING, description: 'One sentence on why this excerpt is relevant.' },
+					reason: {
+						type: Type.STRING,
+						description:
+							'One sentence on why this excerpt is relevant.',
+					},
 				},
 				required: ['index', 'excerpt', 'reason'],
 			},
@@ -222,9 +306,12 @@ export class GeminiGenerate {
 		this.model = model;
 	}
 
-	private async generate(prompt: string): Promise<string> {
+	private async generate(
+		prompt: string,
+		model: string = this.model,
+	): Promise<string> {
 		const response = await this.ai.models.generateContent({
-			model: this.model,
+			model,
 			contents: prompt,
 		});
 		const text = response.text;
@@ -232,15 +319,22 @@ export class GeminiGenerate {
 		return text.trim();
 	}
 
-	/** Runs a structured-output call with thinking enabled, returning the parsed JSON plus the thought summary. */
-	private async generateStructured<T>(prompt: string, schema: Schema): Promise<{ thinking: string; parsed: T }> {
+	/** Runs a structured-output call, returning the parsed JSON plus the thought summary (empty when `includeThinking` is false). */
+	private async generateStructured<T>(
+		prompt: string,
+		schema: Schema,
+		model: string = this.model,
+		includeThinking = true,
+	): Promise<{ thinking: string; parsed: T }> {
 		const response = await this.ai.models.generateContent({
-			model: this.model,
+			model,
 			contents: prompt,
 			config: {
 				responseMimeType: 'application/json',
 				responseSchema: schema,
-				thinkingConfig: { includeThoughts: true },
+				...(includeThinking
+					? { thinkingConfig: { includeThoughts: true } }
+					: {}),
 			},
 		});
 
@@ -258,7 +352,7 @@ export class GeminiGenerate {
 	async generateSearchKeywords(prompt: string): Promise<string> {
 		const fullPrompt = [
 			'You are helping search a vector database of documents.',
-			'Given the user\'s prompt below, write a short, keyword-dense description of what to',
+			"Given the user's prompt below, write a short, keyword-dense description of what to",
 			'look for — the concepts, terms, and phrases most likely to appear in relevant passages.',
 			'Reply with only the description text, no preamble.',
 			'',
@@ -286,7 +380,7 @@ export class GeminiGenerate {
 			'do not actually answer the query.',
 			'',
 			'For each relevant snippet, copy out the exact verbatim excerpt — a direct substring of',
-			'that snippet\'s text, not a summary or paraphrase — that most directly answers the query,',
+			"that snippet's text, not a summary or paraphrase — that most directly answers the query,",
 			'and briefly explain why it is relevant.',
 			'',
 			'Also write a formal, direct answer to the query itself, synthesized from the relevant',
@@ -299,11 +393,15 @@ export class GeminiGenerate {
 			snippetsBlock,
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<{ response: string; relevant: RerankedSnippet[] }>(
-			prompt,
-			RERANK_SCHEMA,
-		);
-		return { thinking, response: parsed.response, relevant: parsed.relevant };
+		const { thinking, parsed } = await this.generateStructured<{
+			response: string;
+			relevant: RerankedSnippet[];
+		}>(prompt, RERANK_SCHEMA);
+		return {
+			thinking,
+			response: parsed.response,
+			relevant: parsed.relevant,
+		};
 	}
 
 	/**
@@ -345,10 +443,9 @@ export class GeminiGenerate {
 			snippetsBlock,
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<Omit<ControlAnalysis, 'thinking'>>(
-			prompt,
-			CONTROL_ANALYSIS_SCHEMA,
-		);
+		const { thinking, parsed } = await this.generateStructured<
+			Omit<ControlAnalysis, 'thinking'>
+		>(prompt, CONTROL_ANALYSIS_SCHEMA);
 		return { thinking, ...parsed };
 	}
 
@@ -361,7 +458,11 @@ export class GeminiGenerate {
 	async assessResearchProgress(
 		memorySummary: string,
 		findingsText: string,
-		refinement?: { previousProgress: string; previousGaps: string[]; userFeedback: string },
+		refinement?: {
+			previousProgress: string;
+			previousGaps: string[];
+			userFeedback: string;
+		},
 	): Promise<ResearchAssessment> {
 		const prompt = [
 			'You are an auditor tracking research progress while gathering evidence for a control.',
@@ -372,20 +473,22 @@ export class GeminiGenerate {
 			'missing. List the missing items concretely as gaps. Then write an updated memory summary',
 			'reflecting the current state (what remains outstanding), to carry forward.',
 			'',
-			...(refinement ? [
-				'This is a refinement of your own previous assessment. Take the auditor\'s feedback',
-				'into account and adjust your progress/gaps/memory accordingly rather than starting over.',
-				'',
-				'Your previous progress assessment:',
-				refinement.previousProgress,
-				'',
-				'Your previous gaps:',
-				refinement.previousGaps.join('\n') || '(none)',
-				'',
-				'Auditor\'s feedback:',
-				refinement.userFeedback,
-				'',
-			] : []),
+			...(refinement
+				? [
+						"This is a refinement of your own previous assessment. Take the auditor's feedback",
+						'into account and adjust your progress/gaps/memory accordingly rather than starting over.',
+						'',
+						'Your previous progress assessment:',
+						refinement.previousProgress,
+						'',
+						'Your previous gaps:',
+						refinement.previousGaps.join('\n') || '(none)',
+						'',
+						"Auditor's feedback:",
+						refinement.userFeedback,
+						'',
+					]
+				: []),
 			'Memory summary:',
 			memorySummary,
 			'',
@@ -393,15 +496,16 @@ export class GeminiGenerate {
 			findingsText || '(no findings)',
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<Omit<ResearchAssessment, 'thinking'>>(
-			prompt,
-			RESEARCH_ASSESSMENT_SCHEMA,
-		);
+		const { thinking, parsed } = await this.generateStructured<
+			Omit<ResearchAssessment, 'thinking'>
+		>(prompt, RESEARCH_ASSESSMENT_SCHEMA);
 		return { thinking, ...parsed };
 	}
 
 	/** Drafts a search query to run against the evidence vector store, given the understood control. */
-	async synthesizeEvidenceQuery(controlUnderstanding: string): Promise<string> {
+	async synthesizeEvidenceQuery(
+		controlUnderstanding: string,
+	): Promise<string> {
 		const prompt = [
 			'You are helping an auditor find evidence for a control requirement.',
 			'Given the control understanding below, write a single, concise search query',
@@ -421,7 +525,12 @@ export class GeminiGenerate {
 	 */
 	async planFinalization(
 		controlUnderstanding: string,
-		items: { index: number; label: string; kind: 'evidence' | 'control'; text: string }[],
+		items: {
+			index: number;
+			label: string;
+			kind: 'evidence' | 'control';
+			text: string;
+		}[],
 	): Promise<FinalizationPlan> {
 		const itemsBlock = items
 			.map((it) => `[${it.index}] (${it.kind}) ${it.label}\n${it.text}`)
@@ -449,17 +558,16 @@ export class GeminiGenerate {
 			itemsBlock,
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<Omit<FinalizationPlan, 'thinking'>>(
-			prompt,
-			FINALIZATION_SCHEMA,
-		);
+		const { thinking, parsed } = await this.generateStructured<
+			Omit<FinalizationPlan, 'thinking'>
+		>(prompt, FINALIZATION_SCHEMA);
 		return { thinking, ...parsed };
 	}
 
 	/**
-	 * Drafts the final control text from the accumulated, user-curated retrieval context, strictly
-	 * following the given writing rules, and separately extracts the requirement's own nomenclature
-	 * (e.g. "SIG-6.3.1-03") to use as the note title — kept apart from the conclusion body.
+	 * Drafts the Test of Design finding/recommendation/rating from the accumulated, user-curated
+	 * retrieval context, strictly following the given writing rules for phrasing, and separately
+	 * identifies the standard + topic for the control record's own fields.
 	 */
 	async draftControl(
 		controlUnderstanding: string,
@@ -469,28 +577,33 @@ export class GeminiGenerate {
 		guidance: string,
 	): Promise<DraftedControl> {
 		const prompt = [
-			'You are an auditor drafting a control write-up.',
+			'You are an auditor drafting the Test of Design assessment for a control.',
 			'Use the control understanding, the evidence found in the vault, and the style of',
-			'previously written controls to draft the new control.',
+			'previously written controls to draft the finding and (if needed) recommendation.',
 			'',
-			'You MUST follow the writing rules below exactly — they define the required structure,',
-			'wording, and formatting of the "conclusion" field. It must contain nothing except what',
-			'the rules produce: no preamble, no explanation, no markdown code fences, no extra',
-			'commentary before or after.',
+			'You MUST follow the writing rules below exactly for phrasing and structure — they define',
+			'how the finding and recommendation must be worded. The "todFinding" field must contain',
+			'only the finding content (what RULE 3/RULE 4 would put under "Findings:"); the',
+			'"todRecommendation" field must contain only the recommendation content (what RULE 2/RULE 5',
+			'would put under "Observations/Recommendations:"), or an empty string if the rating is "C".',
+			'Neither field should contain the section headings themselves, only their content.',
 			'',
-			'Separately, build the note title from the requirement\'s own nomenclature: the name of the',
-			'standard it comes from, followed by its short identifier code. E.g. given a requirement',
-			'"SIG-6.3.1-03: Clause SRC_SA.1.4 of EN 419241-1 [3], specifying access control, shall',
-			'apply." found in standard "ETSI TS 119 431-1", the title is exactly',
-			'"ETSI TS 119 431-1 SIG-6.3.1-03" — the standard name plus the leading identifier code,',
-			'not the description that follows it. Take the standard name from the source file',
-			'references in the control understanding below. If no identifier code is present, write a',
-			'short (few-word) descriptive title instead, still prefixed with the standard name if known.',
+			'Decide the todRating: "C" if fully conform with no issues, "C*" if conform but with a',
+			'minor observation, "NC" if a non-conformity requiring a recommendation was found.',
+			'',
+			'Also identify the name of the standard this control/requirement comes from, and a short',
+			'topic label for it (e.g. "Device Management"), from the control understanding below.',
 			'',
 			'Writing rules:',
 			writingRules,
 			'',
-			...(guidance ? ['Additional guidance for finalizing this report:', guidance, ''] : []),
+			...(guidance
+				? [
+						'Additional guidance for finalizing this report:',
+						guidance,
+						'',
+					]
+				: []),
 			'Control understanding:',
 			controlUnderstanding,
 			'',
@@ -500,13 +613,90 @@ export class GeminiGenerate {
 			'Similar previously written controls (style reference):',
 			similarControlsContext || '(none selected)',
 			'',
-			'Write the drafted control now, following the writing rules exactly.',
+			'Draft the Test of Design assessment now, following the writing rules exactly.',
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<Omit<DraftedControl, 'thinking'>>(
-			prompt,
-			DRAFT_CONTROL_SCHEMA,
-		);
+		const { thinking, parsed } = await this.generateStructured<
+			Omit<DraftedControl, 'thinking'>
+		>(prompt, DRAFT_CONTROL_SCHEMA);
 		return { thinking, ...parsed };
+	}
+
+	/**
+	 * Import step 1: given the workbook's headers and a handful of sample rows (never the whole
+	 * file), asks the cheap import model to propose which column maps to which control field.
+	 * The user reviews/corrects this mapping before any bulk extraction happens.
+	 */
+	async mapExcelColumns(
+		headers: string[],
+		sampleRows: string[][],
+		instructions: string,
+	): Promise<{
+		thinking: string;
+		mapping: Partial<Record<ControlFieldKey, string>>;
+		notes: string;
+	}> {
+		const sampleBlock = sampleRows
+			.map(
+				(row, i) =>
+					`Row ${i + 1}: ${headers.map((h, ci) => `${h}=${row[ci] ?? ''}`).join(' | ')}`,
+			)
+			.join('\n');
+		const prompt = [
+			'You are helping an auditor import controls from a spreadsheet into a structured format.',
+			"Given the spreadsheet's column headers and a few sample rows, decide which column (by exact",
+			'header text) corresponds to each target field. A column may be left unmapped (empty string)',
+			'if nothing in the sheet corresponds to it. Do not guess wildly — only map a column when it',
+			"plausibly contains that field's data.",
+			'',
+			'Target fields:',
+			CONTROL_FIELD_KEYS.map((k) => `- ${k}`).join('\n'),
+			'',
+			...(instructions
+				? ["Auditor's additional instructions:", instructions, '']
+				: []),
+			'Column headers:',
+			headers.join(' | '),
+			'',
+			'Sample rows:',
+			sampleBlock,
+		].join('\n');
+
+		const properties = Object.fromEntries(
+			CONTROL_FIELD_KEYS.map((k) => [
+				k,
+				{
+					type: Type.STRING,
+					description: `Exact column header that maps to "${k}", or empty string if no column corresponds to it.`,
+				},
+			]),
+		);
+		const schema: Schema = {
+			type: Type.OBJECT,
+			properties: {
+				mapping: {
+					type: Type.OBJECT,
+					properties,
+					required: [...CONTROL_FIELD_KEYS],
+				},
+				notes: {
+					type: Type.STRING,
+					description:
+						'Notes on ambiguities or fields that could not be mapped.',
+				},
+			},
+			required: ['mapping', 'notes'],
+		};
+
+		const { thinking, parsed } = await this.generateStructured<{
+			mapping: Record<string, string>;
+			notes: string;
+		}>(prompt, schema, IMPORT_MODEL, true);
+		const mapping: Partial<Record<ControlFieldKey, string>> = {};
+		for (const key of CONTROL_FIELD_KEYS) {
+			const value = parsed.mapping[key];
+			if (value) mapping[key] = value;
+		}
+		return { thinking, mapping, notes: parsed.notes };
 	}
 }

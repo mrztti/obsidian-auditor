@@ -1,17 +1,32 @@
-import { ItemView, WorkspaceLeaf } from 'obsidian';
+import { ItemView, TFile, WorkspaceLeaf } from 'obsidian';
 import type AuditorPlugin from './main';
 import type { StoreKind } from './main';
 import type { ControlAnalysis, FinalizationPlan, ResearchAssessment } from './geminiGenerate';
 import type { IndexSummary, SearchResult } from './vectorStore';
+import type { ThroughputSample } from './rateLimiter';
+import {
+	emptyControlRecord,
+	buildControlNoteContent,
+	parseControlNoteContent,
+	sanitizeFileTitle,
+	statusSlug,
+	type ControlRecord,
+} from './controlNote';
+import { renderControlRecordFields } from './controlFields';
+import { EditControlModal } from './editControlModal';
+import { ImportControlsModal } from './importControlsModal';
+
+const GRAPH_WINDOW_SECONDS = 60;
 
 export const AUDITOR_VIEW_TYPE = 'auditor-main-view';
 
-type TabName = 'indexes' | 'search' | 'pipeline';
+type TabName = 'indexes' | 'search' | 'pipeline' | 'controls';
 
 const TAB_LABELS: Record<TabName, string> = {
 	indexes: 'Indexes',
 	search: 'Document search',
 	pipeline: 'Control drafting',
+	controls: 'Controls',
 };
 
 const DEFAULT_SEARCH_TOP_K = 20;
@@ -42,9 +57,8 @@ interface PipelineState {
 	selectedFinalItems: Set<number>;
 	writingRules: string;
 	finalizationGuidance: string;
-	/** Requirement nomenclature extracted by the drafting model (e.g. "ETSI TS 119 431-1 SIG-6.3.1-03"), used as the note title. */
-	draftTitle: string;
-	draft: string;
+	/** The drafted control record; `control` is seeded from the pipeline input, ToD fields from the drafting model, everything else filled in manually before saving. */
+	draftRecord: ControlRecord;
 	stepsPerformed: StepLogEntry[];
 }
 
@@ -66,8 +80,7 @@ function emptyPipelineState(controlInput: string, defaultWritingRules: string): 
 		selectedFinalItems: new Set(),
 		writingRules: defaultWritingRules,
 		finalizationGuidance: '',
-		draftTitle: '',
-		draft: '',
+		draftRecord: { ...emptyControlRecord(), control: controlInput },
 		stepsPerformed: [],
 	};
 }
@@ -156,6 +169,7 @@ export class AuditorView extends ItemView {
 	private pipelineHistoryEl!: HTMLElement;
 	private pipelineState: PipelineState = emptyPipelineState('', '');
 	private searchStoreKind: StoreKind = 'evidence';
+	private unsubscribeThroughput: (() => void) | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: AuditorPlugin) {
 		super(leaf);
@@ -185,6 +199,7 @@ export class AuditorView extends ItemView {
 			indexes: container.createDiv('auditor-tab-content'),
 			search: container.createDiv('auditor-tab-content'),
 			pipeline: container.createDiv('auditor-tab-content'),
+			controls: container.createDiv('auditor-tab-content'),
 		};
 
 		const tabButtons: Record<TabName, HTMLButtonElement> = {} as Record<TabName, HTMLButtonElement>;
@@ -205,11 +220,14 @@ export class AuditorView extends ItemView {
 		this.renderSearchTab(tabContents.search);
 		this.pipelineEl = tabContents.pipeline;
 		this.renderPipelineStart();
+		this.renderControlsTab(tabContents.controls);
 
 		setActiveTab('indexes');
 	}
 
-	async onClose(): Promise<void> {}
+	async onClose(): Promise<void> {
+		this.unsubscribeThroughput?.();
+	}
 
 	// ─── Indexes tab ────────────────────────────────────────────────────────
 
@@ -218,6 +236,78 @@ export class AuditorView extends ItemView {
 		this.createReindexButton(reindexRow, 'Re-index standards', 'standards');
 		this.createReindexButton(reindexRow, 'Re-index evidence', 'evidence');
 		this.createReindexButton(reindexRow, 'Re-index written controls', 'writtenControls');
+
+		const rateRow = container.createDiv('auditor-rate-row');
+		const rampLabel = rateRow.createEl('label', { cls: 'auditor-search-store-option' });
+		const rampToggle = rampLabel.createEl('input', { type: 'checkbox' });
+		rampToggle.checked = this.plugin.settings.gradualRampUp;
+		rampToggle.addEventListener('change', () => {
+			void (async () => {
+				this.plugin.settings.gradualRampUp = rampToggle.checked;
+				this.plugin.rateLimiter.updateConfig(this.plugin.settings.maxRequestsPerSecond, rampToggle.checked);
+				await this.plugin.saveSettings();
+			})();
+		});
+		rampLabel.createSpan({ text: 'Gradual increase (ramp up request rate instead of starting at full speed)' });
+
+		this.renderThroughputGraph(container);
+	}
+
+	/** Small live graph of embedding-call network throughput (KB/s) and request rate, fed by the shared RateLimiter. */
+	private renderThroughputGraph(container: HTMLElement): void {
+		const graphEl = container.createDiv('auditor-throughput-graph');
+		const statsEl = graphEl.createDiv('auditor-throughput-stats');
+		const svgNs = 'http://www.w3.org/2000/svg';
+		const svg = graphEl.doc.createElementNS(svgNs, 'svg');
+		svg.setAttribute('viewBox', '0 0 300 60');
+		svg.addClass('auditor-throughput-svg');
+		const requestsPath = graphEl.doc.createElementNS(svgNs, 'polyline');
+		requestsPath.addClass('auditor-throughput-line-requests');
+		const kbPath = graphEl.doc.createElementNS(svgNs, 'polyline');
+		kbPath.addClass('auditor-throughput-line-tokens');
+		svg.appendChild(kbPath);
+		svg.appendChild(requestsPath);
+		graphEl.appendChild(svg);
+
+		const legend = graphEl.createDiv('auditor-throughput-legend');
+		legend.createSpan({ text: '— requests/s', cls: 'auditor-throughput-legend-requests' });
+		legend.createSpan({ text: '— KB/s', cls: 'auditor-throughput-legend-tokens' });
+
+		const draw = () => {
+			const samples = this.plugin.rateLimiter.getSamples().slice(-GRAPH_WINDOW_SECONDS);
+			if (samples.length === 0) {
+				statsEl.setText('No embedding activity yet.');
+				requestsPath.setAttribute('points', '');
+				kbPath.setAttribute('points', '');
+				return;
+			}
+
+			const kbPerSecond = samples.map((s) => s.bytes / 1024);
+			const maxRequests = Math.max(1, ...samples.map((s) => s.requests));
+			const maxKb = Math.max(1, ...kbPerSecond);
+			const toPoints = (values: number[], maxY: number) =>
+				values
+					.map((v, i) => {
+						const x = (i / Math.max(1, GRAPH_WINDOW_SECONDS - 1)) * 300;
+						const y = 58 - (v / maxY) * 56;
+						return `${x.toFixed(1)},${y.toFixed(1)}`;
+					})
+					.join(' ');
+			// Left-pad so the line always ends at the right edge, growing from an empty window.
+			const padded: ThroughputSample[] = [
+				...Array<ThroughputSample | null>(Math.max(0, GRAPH_WINDOW_SECONDS - samples.length)).fill(null),
+				...samples,
+			].map((s) => s ?? { time: 0, requests: 0, tokens: 0, bytes: 0 });
+			requestsPath.setAttribute('points', toPoints(padded.map((s) => s.requests), maxRequests));
+			kbPath.setAttribute('points', toPoints(padded.map((s) => s.bytes / 1024), maxKb));
+
+			const last = samples[samples.length - 1]!;
+			statsEl.setText(`${last.requests} req/s, ${(last.bytes / 1024).toFixed(1)} KB/s`);
+		};
+
+		draw();
+		this.unsubscribeThroughput?.();
+		this.unsubscribeThroughput = this.plugin.rateLimiter.onChange(draw);
 	}
 
 	private createReindexButton(container: HTMLElement, label: string, kind: StoreKind): void {
@@ -843,8 +933,14 @@ export class AuditorView extends ItemView {
 				this.pipelineState.writingRules,
 				this.pipelineState.finalizationGuidance,
 			);
-			this.pipelineState.draftTitle = drafted.title;
-			this.pipelineState.draft = drafted.conclusion;
+			this.pipelineState.draftRecord = {
+				...this.pipelineState.draftRecord,
+				standard: drafted.standard,
+				topic: drafted.topic,
+				todFinding: drafted.todFinding,
+				todRecommendation: drafted.todRecommendation,
+				todRating: drafted.todRating,
+			};
 			this.logStep('Drafted the control');
 			status.remove();
 			this.renderThinking(step, drafted.thinking);
@@ -855,29 +951,111 @@ export class AuditorView extends ItemView {
 	}
 
 	private renderDraftStep(step: HTMLElement): void {
-		step.createEl('h5', { text: 'Title' });
-		const titleEl = step.createEl('input', { type: 'text', cls: 'auditor-modal-title-input' });
-		titleEl.value = this.pipelineState.draftTitle;
-		titleEl.addEventListener('input', () => { this.pipelineState.draftTitle = titleEl.value; });
-
-		step.createEl('h5', { text: 'Conclusion' });
-		const textarea = step.createEl('textarea', { cls: 'auditor-pipeline-textarea auditor-pipeline-draft' });
-		textarea.rows = 14;
-		textarea.value = this.pipelineState.draft;
-		textarea.addEventListener('input', () => { this.pipelineState.draft = textarea.value; });
+		renderControlRecordFields(step, this.pipelineState.draftRecord);
 
 		const saveBtn = step.createEl('button', { text: 'Save as new note', cls: 'mod-cta' });
 		const statusEl = step.createDiv();
 		saveBtn.addEventListener('click', () => {
 			void (async () => {
 				try {
-					await this.plugin.saveControlNote(titleEl.value, this.pipelineState.controlInput, textarea.value);
+					await this.plugin.saveControlNote(this.pipelineState.draftRecord);
 					this.logStep('Saved the draft as a new note');
 					statusEl.setText('Saved.');
 				} catch (e) {
 					statusEl.setText(`Save failed: ${String(e)}`);
 				}
 			})();
+		});
+	}
+
+	// ─── Controls tab ───────────────────────────────────────────────────────
+
+	private ratingClass(rating: string): string {
+		if (rating === 'NC') return 'auditor-rating-nc';
+		if (rating === 'C*') return 'auditor-rating-cstar';
+		if (rating === 'C') return 'auditor-rating-c';
+		return 'auditor-rating-none';
+	}
+
+	private renderControlsTab(container: HTMLElement): void {
+		const toolbar = container.createDiv('auditor-controls-toolbar');
+		const searchInput = toolbar.createEl('input', { type: 'text', placeholder: 'Filter by number, standard, topic, status…' });
+		const importBtn = toolbar.createEl('button', { text: 'Import controls' });
+		const refreshBtn = toolbar.createEl('button', { text: 'Refresh' });
+		const status = container.createDiv();
+		const grid = container.createDiv('auditor-controls-grid');
+
+		let allEntries: { file: TFile; record: ControlRecord }[] = [];
+
+		const applyFilter = () => {
+			const query = searchInput.value.trim().toLowerCase();
+			grid.empty();
+			const filtered = query
+				? allEntries.filter((e) =>
+					[e.record.number, e.record.standard, e.record.topic, e.record.status]
+						.some((f) => f.toLowerCase().includes(query)))
+				: allEntries;
+			if (filtered.length === 0) {
+				this.showStatus(grid, 'No controls found.');
+				return;
+			}
+			for (const entry of filtered) this.renderControlCard(grid, entry);
+		};
+
+		const load = async () => {
+			status.setText('Loading controls…');
+			grid.empty();
+			const folder = this.plugin.settings.writtenControlsFolder;
+			const files = this.app.vault.getFiles()
+				.filter((f) => f.extension === 'md' && (!folder || f.path === folder || f.path.startsWith(`${folder}/`)));
+			const entries: { file: TFile; record: ControlRecord }[] = [];
+			for (const file of files) {
+				const content = await this.app.vault.cachedRead(file);
+				entries.push({ file, record: parseControlNoteContent(content, file.basename) });
+			}
+			entries.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
+			allEntries = entries;
+			status.setText(`${entries.length} control(s).`);
+			applyFilter();
+		};
+
+		searchInput.addEventListener('input', applyFilter);
+		refreshBtn.addEventListener('click', () => { void load(); });
+		importBtn.addEventListener('click', () => {
+			new ImportControlsModal(this.app, this.plugin, () => { void load(); }).open();
+		});
+		void load();
+	}
+
+	private renderControlCard(grid: HTMLElement, entry: { file: TFile; record: ControlRecord }): void {
+		const card = grid.createDiv(`auditor-control-card auditor-status-${statusSlug(entry.record.status)}`);
+		const summary = card.createDiv('auditor-control-card-summary');
+		summary.createSpan({ text: entry.record.number || '(no number)', cls: 'auditor-control-card-number' });
+		summary.createSpan({ text: entry.record.status, cls: 'auditor-control-card-status' });
+		card.createDiv({ cls: 'auditor-control-card-standard', text: entry.record.standard });
+		card.createDiv({ cls: 'auditor-control-card-topic', text: entry.record.topic });
+		const metaRow = card.createDiv('auditor-control-card-meta');
+		metaRow.createSpan({ text: `Session: ${entry.record.session || '—'}` });
+		metaRow.createSpan({ text: `Assigned: ${entry.record.assignedMember || '—'}` });
+		const ratingsRow = card.createDiv('auditor-control-card-ratings');
+		ratingsRow.createSpan({ text: `ToD: ${entry.record.todRating || '—'}`, cls: `auditor-rating-badge ${this.ratingClass(entry.record.todRating)}` });
+		ratingsRow.createSpan({ text: `ToE: ${entry.record.toeRating || '—'}`, cls: `auditor-rating-badge ${this.ratingClass(entry.record.toeRating)}` });
+
+		card.addEventListener('click', () => {
+			new EditControlModal(this.app, entry.record, async (updated) => {
+				const folder = this.plugin.settings.writtenControlsFolder;
+				const safeNumber = sanitizeFileTitle(updated.number || entry.file.basename);
+				const newPath = folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`;
+				if (newPath !== entry.file.path) {
+					await this.app.fileManager.renameFile(entry.file, newPath);
+				}
+				await this.app.vault.modify(entry.file, buildControlNoteContent(updated));
+				entry.record = updated;
+				this.logStep(`Saved changes to control ${updated.number}`);
+				void this.plugin.runIndexing('writtenControls');
+				card.remove();
+				this.renderControlCard(grid, entry);
+			}).open();
 		});
 	}
 

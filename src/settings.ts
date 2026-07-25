@@ -17,6 +17,10 @@ export interface AuditorSettings {
 	chunkWords: number;
 	/** Default writing rules pre-filled in the control-drafting pipeline's "Writing rules" step. */
 	defaultWritingRules: string;
+	/** Ceiling on Gemini embedding requests per second during indexing, shared across all three stores. */
+	maxRequestsPerSecond: number;
+	/** When enabled, indexing starts at a slow request rate and ramps up to the ceiling over ~30s instead of starting at full speed. */
+	gradualRampUp: boolean;
 }
 
 const DEFAULT_WRITING_RULES = `RULE 1
@@ -60,6 +64,8 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	maxResults: 10,
 	chunkWords: 300,
 	defaultWritingRules: DEFAULT_WRITING_RULES,
+	maxRequestsPerSecond: 5,
+	gradualRampUp: true,
 };
 
 export class AuditorSettingTab extends PluginSettingTab {
@@ -201,5 +207,33 @@ export class AuditorSettingTab extends PluginSettingTab {
 				text.inputEl.rows = 16;
 				text.inputEl.addClass('auditor-rules-textarea');
 			});
+
+		new Setting(containerEl)
+			.setName('Max requests per second')
+			.setDesc('Ceiling on Gemini embedding requests per second during indexing, shared across all three stores.')
+			.addSlider((slider) =>
+				slider
+					.setLimits(1, 20, 1)
+					.setValue(this.plugin.settings.maxRequestsPerSecond)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.maxRequestsPerSecond = value;
+						this.plugin.rateLimiter.updateConfig(value, this.plugin.settings.gradualRampUp);
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Gradual increase')
+			.setDesc('Ramp indexing up from a slow request rate to the ceiling above over ~30s, instead of starting at full speed.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.gradualRampUp)
+					.onChange(async (value) => {
+						this.plugin.settings.gradualRampUp = value;
+						this.plugin.rateLimiter.updateConfig(this.plugin.settings.maxRequestsPerSecond, value);
+						await this.plugin.saveSettings();
+					}),
+			);
 	}
 }
