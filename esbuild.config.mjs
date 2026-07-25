@@ -44,6 +44,10 @@ const context = await esbuild.context({
 	external: [
 		'obsidian',
 		'electron',
+		// vectra's TransformersEmbeddings lazily requires this for local ONNX embeddings,
+		// a code path we never use (we only use GeminiEmbeddings) — mark external so esbuild
+		// doesn't try to bundle a dependency we intentionally removed.
+		'@huggingface/transformers',
 		'@codemirror/autocomplete',
 		'@codemirror/collab',
 		'@codemirror/commands',
@@ -67,12 +71,6 @@ const context = await esbuild.context({
 	minify: prod,
 	platform: 'browser',
 	define: {
-		// esbuild's 'cjs' output sets `import.meta = {}` (no `.url`), which breaks
-		// onnxruntime-web's wasm asset resolution: it does
-		// `new URL('ort-wasm-simd-threaded.asyncify.wasm', import.meta.url)` to find
-		// its .wasm binaries. Point it at the matching version on jsdelivr so that
-		// relative URL resolution lands on real files instead of throwing on `undefined`.
-		'import.meta.url': JSON.stringify('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.bundle.min.mjs'),
 		__PDF_WORKER_SOURCE__: JSON.stringify(pdfWorkerSource),
 	},
 });

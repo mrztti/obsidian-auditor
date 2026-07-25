@@ -1,103 +1,168 @@
-/* eslint-disable no-console */
-import { FileSystemAdapter, MarkdownView, Notice, Plugin, TFile, normalizePath } from 'obsidian';
-import { AuditorSettings, DEFAULT_SETTINGS, AuditorSettingTab } from './settings';
-import { ModelLoadProgress, VaultIndexer } from './indexer';
-import { SearchView, SEARCH_VIEW_TYPE } from './searchView';
-import { SectionView, SECTION_VIEW_TYPE, FRONTMATTER_KEY, FRONTMATTER_VALUE } from './sectionView';
-import { GraphView, GRAPH_VIEW_TYPE } from './graphView';
-import { GraphCanvasView, GRAPH_CANVAS_VIEW_TYPE, type GraphNodeDef, type GraphEdgeDef } from './graphCanvasView';
-import { buildSkeleton } from './sections';
-import { NewFindingModal } from './newFindingModal';
+import { FileSystemAdapter, Notice, Plugin, normalizePath } from 'obsidian';
+import {
+	AuditorSettings,
+	DEFAULT_SETTINGS,
+	AuditorSettingTab,
+} from './settings';
+import { AuditVectorStore, type IndexSummary } from './vectorStore';
+import { GeminiEmbeddings } from './geminiEmbeddings';
+import { GeminiGenerate } from './geminiGenerate';
+import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
+import { FileExplorerDecorator } from './fileExplorerDecorator';
+import { AddControlModal } from './addControlModal';
 
-const log = (...args: unknown[]) => console.log('[Auditor]', ...args);
+const log = (...args: unknown[]) => console.debug('[Auditor]', ...args);
+
+export type StoreKind = 'standards' | 'evidence' | 'writtenControls';
+
+/**
+ * Turns a free-text control description (often long and multi-line) into a safe, short note
+ * title: only the first line is used (avoiding embedded newlines entirely), every character
+ * Obsidian forbids in filenames is stripped, and trailing dots/spaces (which Windows also
+ * rejects) and path-traversal sequences are removed, then the result is length-capped.
+ */
+function sanitizeFileTitle(title: string, maxLength = 80): string {
+	const firstLine = title.split(/\r?\n/)[0] ?? '';
+	const cleaned = firstLine
+		.replace(/[\\/:*?"<>|]/g, '-')
+		.replace(/\.\.+/g, '.')
+		.trim()
+		.slice(0, maxLength)
+		.replace(/[\s.]+$/, '')
+		.trim();
+	return cleaned || 'Untitled control';
+}
+
+/** The one canonical markdown shape every control note is saved in, everywhere in the plugin. */
+function buildControlNoteContent(requirement: string, conclusion: string): string {
+	return [
+		'## Control',
+		'',
+		requirement,
+		'',
+		'## Control report',
+		'',
+		conclusion,
+	].join('\n');
+}
 
 export default class AuditorPlugin extends Plugin {
 	settings!: AuditorSettings;
-	indexer!: VaultIndexer;
-	private modelNotice: Notice | null = null;
+	standardsIndex!: AuditVectorStore;
+	evidenceIndex!: AuditVectorStore;
+	writtenControlsIndex!: AuditVectorStore;
+	geminiGenerate!: GeminiGenerate;
+	fileExplorerDecorator!: FileExplorerDecorator;
 
 	async onload() {
 		log('onload: plugin loading');
 		await this.loadSettings();
-		log('onload: settings loaded', this.settings);
 
-		const indexRootFolder = this.getIndexRootFolder();
-		log('onload: index root folder', indexRootFolder);
-		this.indexer = new VaultIndexer(
+		const embeddings = new GeminiEmbeddings(
+			this.settings.geminiApiKey,
 			this.settings.embeddingModel,
-			indexRootFolder,
-			undefined,
-			(progress: ModelLoadProgress) => { this.onModelProgress(progress); },
+		);
+		this.geminiGenerate = new GeminiGenerate(
+			this.settings.geminiApiKey,
+			this.settings.generationModel,
 		);
 
-		this.registerView(SEARCH_VIEW_TYPE, (leaf) => new SearchView(leaf, this));
-		this.registerView(SECTION_VIEW_TYPE, (leaf) => new SectionView(leaf, this));
-		this.registerView(GRAPH_VIEW_TYPE, (leaf) => new GraphView(leaf, this));
-		this.registerView(GRAPH_CANVAS_VIEW_TYPE, (leaf) => new GraphCanvasView(leaf, this));
+		const dataRoot = this.getPluginDataFolder();
+		this.standardsIndex = new AuditVectorStore(
+			embeddings,
+			`${dataRoot}/vector-index/standards`,
+			this.settings.chunkWords,
+		);
+		this.evidenceIndex = new AuditVectorStore(
+			embeddings,
+			`${dataRoot}/vector-index/evidence`,
+			this.settings.chunkWords,
+		);
+		this.writtenControlsIndex = new AuditVectorStore(
+			embeddings,
+			`${dataRoot}/vector-index/written-controls`,
+			this.settings.chunkWords,
+		);
 
-		this.addRibbonIcon('search', 'Open vault search', () => {
-			void this.activateSearchView();
+		this.fileExplorerDecorator = new FileExplorerDecorator(this);
+		this.app.workspace.onLayoutReady(() => {
+			this.fileExplorerDecorator.scheduleRefresh();
+		});
+		this.registerEvent(
+			this.app.workspace.on('layout-change', () => {
+				this.fileExplorerDecorator.scheduleRefresh();
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('create', () => {
+				this.fileExplorerDecorator.scheduleRefresh();
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('delete', () => {
+				this.fileExplorerDecorator.scheduleRefresh();
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('rename', () => {
+				this.fileExplorerDecorator.scheduleRefresh();
+			}),
+		);
+
+		this.registerView(
+			AUDITOR_VIEW_TYPE,
+			(leaf) => new AuditorView(leaf, this),
+		);
+
+		this.addRibbonIcon('bot', 'Open auditor', () => {
+			void this.activateAuditorView();
 		});
 
-		this.addRibbonIcon('list-tree', 'Open as audit finding', () => {
-			const file = this.app.workspace.getActiveFile();
-			if (file && file.extension === 'md') void this.maybeReplaceWithSectionView(file, true);
-		});
-
-		this.addRibbonIcon('share-2', 'Open phrase graph', () => {
-			void this.activateGraphView();
-		});
-
-		this.registerEvent(this.app.workspace.on('file-open', (file) => {
-			if (file) void this.maybeReplaceWithSectionView(file);
-		}));
-
-		this.addCommand({
-			id: 'open-semantic-search',
-			name: 'Open semantic search',
-			callback: () => { void this.activateSearchView(); },
-		});
-
-		this.addCommand({
-			id: 'reindex-folder',
-			name: 'Re-index vault folder',
-			callback: () => { void this.runIndexing(); },
-		});
-
-		this.addCommand({
-			id: 'cancel-indexing',
-			name: 'Cancel indexing',
-			checkCallback: (checking) => {
-				if (!this.indexer.isIndexing) return false;
-				if (!checking) this.indexer.cancelIndexing();
-				return true;
-			},
-		});
-
-		this.addCommand({
-			id: 'open-audit-sections',
-			name: 'Open as audit sections',
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				if (!file || file.extension !== 'md') return false;
-				if (!checking) {
-					void this.maybeReplaceWithSectionView(file, true);
-				}
-				return true;
-			},
-		});
-
-		this.addCommand({
-			id: 'open-phrase-graph',
-			name: 'Open phrase graph',
-			callback: () => { void this.activateGraphView(); },
+		this.addRibbonIcon('file-plus', 'Add control', () => {
+			new AddControlModal(this.app, (title, requirement, conclusion) => {
+				void this.saveControlNote(title, requirement, conclusion);
+			}).open();
 		});
 
 		this.addCommand({
-			id: 'new-finding-note',
-			name: 'New finding note',
+			id: 'open-auditor',
+			name: 'Open main view',
 			callback: () => {
-				new NewFindingModal(this.app, (name) => { void this.createFindingNote(name); }).open();
+				void this.activateAuditorView();
+			},
+		});
+
+		this.addCommand({
+			id: 'add-control',
+			name: 'Add control',
+			callback: () => {
+				new AddControlModal(this.app, (title, requirement, conclusion) => {
+					void this.saveControlNote(title, requirement, conclusion);
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'reindex-standards',
+			name: 'Re-index standards',
+			callback: () => {
+				void this.runIndexing('standards');
+			},
+		});
+
+		this.addCommand({
+			id: 'reindex-evidence',
+			name: 'Re-index evidence',
+			callback: () => {
+				void this.runIndexing('evidence');
+			},
+		});
+
+		this.addCommand({
+			id: 'reindex-written-controls',
+			name: 'Re-index written controls',
+			callback: () => {
+				void this.runIndexing('writtenControls');
 			},
 		});
 
@@ -108,172 +173,130 @@ export default class AuditorPlugin extends Plugin {
 		log('onunload: plugin unloading');
 	}
 
-	/** Absolute path to this plugin's own data folder, used to persist the vector index as plain files. */
-	private getIndexRootFolder(): string {
+	/** Absolute path to this plugin's own data folder, used to persist the vector indexes as plain files. */
+	private getPluginDataFolder(): string {
 		const adapter = this.app.vault.adapter;
 		if (!(adapter instanceof FileSystemAdapter)) {
-			throw new Error('Auditor requires the desktop app (FileSystemAdapter) to persist its index.');
+			throw new Error(
+				'Auditor requires the desktop app (FileSystemAdapter) to persist its index.',
+			);
 		}
-		const relativePath = `${this.app.vault.configDir}/plugins/${this.manifest.id}/vector-index`;
+		const relativePath = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
 		return adapter.getFullPath(relativePath);
 	}
 
-	/** Surfaces @huggingface/transformers model download progress as a Notice "progress bar". */
-	private onModelProgress(progress: ModelLoadProgress): void {
-		log('onModelProgress', progress);
-
-		if (progress.status === 'done' || progress.status === 'ready') {
-			if (this.modelNotice) {
-				this.modelNotice.setMessage('Auditor: model ready!');
-				window.setTimeout(() => {
-					this.modelNotice?.hide();
-					this.modelNotice = null;
-				}, 2000);
-			}
-			return;
-		}
-
-		if (!this.modelNotice) {
-			this.modelNotice = new Notice('Auditor: preparing model…', 0);
-		}
-
-		const file = progress.file ?? 'model';
-		if (typeof progress.progress === 'number') {
-			const pct = Math.round(progress.progress);
-			const bar = '█'.repeat(Math.round(pct / 5)).padEnd(20, '░');
-			this.modelNotice.setMessage(`Auditor: downloading ${file}\n[${bar}] ${pct}%`);
-		} else {
-			this.modelNotice.setMessage(`Auditor: ${progress.status} ${file}`);
-		}
+	storeFor(kind: StoreKind): AuditVectorStore {
+		if (kind === 'standards') return this.standardsIndex;
+		if (kind === 'evidence') return this.evidenceIndex;
+		return this.writtenControlsIndex;
 	}
 
-	async runIndexing(): Promise<void> {
-		if (this.indexer.isIndexing) {
-			new Notice('Auditor: indexing already in progress.');
-			return;
+	private folderFor(kind: StoreKind): string {
+		if (kind === 'standards') return this.settings.standardsFolder;
+		if (kind === 'evidence') return this.settings.evidenceFolder;
+		return this.settings.writtenControlsFolder;
+	}
+
+	private labelFor(kind: StoreKind): string {
+		if (kind === 'standards') return 'Standards';
+		if (kind === 'evidence') return 'Evidence';
+		return 'Written controls';
+	}
+
+	/**
+	 * Runs indexing for the given store. `onProgress`, if given, is called in addition to the
+	 * usual cancellable Notice — used by AuditorView to render live progress inline in the view.
+	 */
+	async runIndexing(
+		kind: StoreKind,
+		onProgress?: (done: number, total: number, label: string) => void,
+	): Promise<IndexSummary | null> {
+		const store = this.storeFor(kind);
+		const label = this.labelFor(kind);
+		if (store.isIndexing) {
+			new Notice(`Auditor: ${label} indexing already in progress.`);
+			return null;
 		}
-		log('runIndexing: starting', { indexFolder: this.settings.indexFolder });
-		const notice = new Notice('Auditor: indexing… 0% (click to cancel)', 0);
+		log('runIndexing: starting', { kind, folder: this.folderFor(kind) });
+		const notice = new Notice(
+			`Auditor: indexing ${label}… 0% (click to cancel)`,
+			0,
+		);
 		// `messageEl` needs Obsidian 1.8.7+; this plugin's minAppVersion is 1.7.2, so we
 		// stick with the older (deprecated but still functional) `noticeEl`.
 		// eslint-disable-next-line @typescript-eslint/no-deprecated
 		notice.noticeEl.addClass('auditor-cancellable-notice');
 		// eslint-disable-next-line @typescript-eslint/no-deprecated
-		notice.noticeEl.addEventListener('click', () => { this.indexer.cancelIndexing(); });
+		notice.noticeEl.addEventListener('click', () => {
+			store.cancelIndexing();
+		});
 		try {
-			let cancelled = false;
-			const titleOnlyPaths = this.settings.titleOnlyPaths
-				.split('\n')
-				.map((p) => p.trim())
-				.filter((p) => p.length > 0);
-			await this.indexer.indexVaultFolder(
+			const summary = await store.indexFolder(
 				this.app.vault,
-				this.settings.indexFolder,
-				(done, total, label) => {
-					if (label === 'Cancelled') cancelled = true;
-					const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-					const suffix = cancelled ? '' : ' (click to cancel)';
-					notice.setMessage(`Auditor: ${label} (${done}/${total} — ${pct}%)${suffix}`);
+				this.folderFor(kind),
+				(done, total, indexLabel) => {
+					const pct =
+						total > 0 ? Math.round((done / total) * 100) : 0;
+					const suffix =
+						indexLabel === 'Cancelled' ? '' : ' (click to cancel)';
+					notice.setMessage(
+						`Auditor: ${label} — ${indexLabel} (${done}/${total} — ${pct}%)${suffix}`,
+					);
+					onProgress?.(done, total, indexLabel);
 				},
-				titleOnlyPaths,
 			);
-			notice.setMessage(cancelled ? 'Auditor: indexing cancelled.' : 'Auditor: indexing complete!');
-			log('runIndexing: complete', { cancelled });
+			notice.setMessage(
+				summary.cancelled
+					? `Auditor: ${label} indexing cancelled.`
+					: `Auditor: ${label} indexing complete!`,
+			);
 			window.setTimeout(() => notice.hide(), 3000);
+			this.fileExplorerDecorator.scheduleRefresh();
+			return summary;
 		} catch (e) {
 			notice.hide();
 			console.error('[Auditor] runIndexing failed', e);
-			new Notice(`Auditor: indexing failed — ${String(e)}`);
+			new Notice(`Auditor: ${label} indexing failed — ${String(e)}`);
+			return null;
 		}
 	}
 
-	private async activateSearchView(): Promise<void> {
-		const leaves = this.app.workspace.getLeavesOfType(SEARCH_VIEW_TYPE);
+	async activateAuditorView(): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(AUDITOR_VIEW_TYPE);
 		const existing = leaves[0];
 		if (existing) {
 			void this.app.workspace.revealLeaf(existing);
 			return;
 		}
-		const leaf = this.app.workspace.getRightLeaf(false);
-		if (!leaf) return;
-		await leaf.setViewState({ type: SEARCH_VIEW_TYPE, active: true });
-		void this.app.workspace.revealLeaf(leaf);
-	}
-
-	/** Opens (or reuses) the main-area force-graph view and feeds it the given graph. */
-	async openGraphCanvas(nodes: GraphNodeDef[], edges: GraphEdgeDef[]): Promise<void> {
-		let leaf = this.app.workspace.getLeavesOfType(GRAPH_CANVAS_VIEW_TYPE)[0];
-		if (!leaf) {
-			leaf = this.app.workspace.getLeaf('tab');
-			await leaf.setViewState({ type: GRAPH_CANVAS_VIEW_TYPE, active: true });
-		} else {
-			void this.app.workspace.revealLeaf(leaf);
-		}
-		const view = leaf.view;
-		if (view instanceof GraphCanvasView) view.setGraphData(nodes, edges);
-	}
-
-	private async activateGraphView(): Promise<void> {
-		const leaves = this.app.workspace.getLeavesOfType(GRAPH_VIEW_TYPE);
-		const existing = leaves[0];
-		if (existing) {
-			void this.app.workspace.revealLeaf(existing);
-			return;
-		}
-		const leaf = this.app.workspace.getLeftLeaf(false);
-		if (!leaf) return;
-		await leaf.setViewState({ type: GRAPH_VIEW_TYPE, active: true });
+		const leaf = this.app.workspace.getLeaf('tab');
+		await leaf.setViewState({ type: AUDITOR_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
 	}
 
 	/**
-	 * Reads the frontmatter flag straight from disk rather than `metadataCache`,
-	 * which can lag behind a just-opened or just-created file and cause the
-	 * auto-swap below to silently no-op on the first open.
+	 * Creates a new note in the written-controls folder, in the canonical Control/Control report
+	 * format, then re-indexes that folder so the new control is immediately searchable. `title` is
+	 * the requirement's own nomenclature (e.g. "ETSI TS 119 431-1 SIG-6.3.1-03"), used as the
+	 * filename; falls back to deriving one from `requirement` when not given.
 	 */
-	private async isFindingNote(file: TFile): Promise<boolean> {
-		if (file.extension !== 'md') return false;
-		const content = await this.app.vault.cachedRead(file);
-		const fmMatch = /^---\n([\s\S]*?)\n---/.exec(content);
-		if (!fmMatch) return false;
-		const re = new RegExp(`^${FRONTMATTER_KEY}:\\s*["']?${FRONTMATTER_VALUE}["']?\\s*$`, 'm');
-		return re.test(fmMatch[1]!);
-	}
-
-	/**
-	 * Swaps every markdown leaf currently showing `file` over to our
-	 * full-replacement SectionView, when the file is flagged as a finding note.
-	 */
-	private async maybeReplaceWithSectionView(file: TFile, skipFlagCheck = false): Promise<void> {
-		log('maybeReplaceWithSectionView: checking', file.path);
-		if (!skipFlagCheck && !(await this.isFindingNote(file))) {
-			log('maybeReplaceWithSectionView: not a finding note, skipping', file.path);
-			return;
-		}
-		const leaves = this.app.workspace.getLeavesOfType('markdown');
-		log('maybeReplaceWithSectionView: candidate markdown leaves', leaves.length);
-		for (const leaf of leaves) {
-			const view = leaf.view;
-			if (view instanceof MarkdownView && view.file?.path === file.path) {
-				log('maybeReplaceWithSectionView: swapping leaf for', file.path);
-				await leaf.setViewState({ type: SECTION_VIEW_TYPE, state: leaf.getViewState().state });
-			}
-		}
-	}
-
-	/** Creates a new note flagged with our frontmatter type and the empty 4-section skeleton. */
-	private async createFindingNote(title: string): Promise<void> {
-		// Strip path separators and traversal segments so a typo'd title (e.g. containing
-		// "../") can never write outside the vault via vault.create().
-		const safeTitle = title.replace(/[/\\]/g, '-').replace(/\.\.+/g, '.');
-		const path = normalizePath(`${safeTitle}.md`);
-		const content = `---\n${FRONTMATTER_KEY}: ${FRONTMATTER_VALUE}\n---\n\n${buildSkeleton()}`;
+	async saveControlNote(title: string, requirement: string, conclusion: string): Promise<void> {
+		const folder = this.settings.writtenControlsFolder;
+		const safeTitle = sanitizeFileTitle(title || requirement);
+		const path = normalizePath(
+			folder ? `${folder}/${safeTitle}.md` : `${safeTitle}.md`,
+		);
+		const content = buildControlNoteContent(requirement, conclusion);
 		const file = await this.app.vault.create(path, content);
 		await this.app.workspace.getLeaf(false).openFile(file);
+		void this.runIndexing('writtenControls');
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<AuditorSettings>);
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			(await this.loadData()) as Partial<AuditorSettings>,
+		);
 	}
 
 	async saveSettings() {

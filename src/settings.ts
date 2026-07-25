@@ -2,22 +2,64 @@ import { App, PluginSettingTab, Setting } from 'obsidian';
 import AuditorPlugin from './main';
 
 export interface AuditorSettings {
-	indexFolder: string;
+	/** Gemini API key, stored in plain text in data.json (same as every other plugin holding an API key). */
+	geminiApiKey: string;
 	embeddingModel: string;
+	generationModel: string;
+	/** Vault folder containing the standards used for auditing (e.g. ETSI 119431). */
+	standardsFolder: string;
+	/** Vault folder containing audit evidence. */
+	evidenceFolder: string;
+	/** Vault folder containing previously drafted/written controls, used as style references. */
+	writtenControlsFolder: string;
 	maxResults: number;
+	/** Target paragraph-chunk size in words. */
 	chunkWords: number;
-	graphNotePath: string;
-	/** Newline-separated path patterns ('*' wildcard) indexed by title only, content never embedded. */
-	titleOnlyPaths: string;
+	/** Default writing rules pre-filled in the control-drafting pipeline's "Writing rules" step. */
+	defaultWritingRules: string;
 }
 
+const DEFAULT_WRITING_RULES = `RULE 1
+Output your results in the following structure:
+Findings:
+....
+Observations/Recommendations:
+...
+Evidence:
+...
+Do not output anything else
+
+RULE 2
+If a minor non-conformity is found, give a recommendation in Observations, but do not show Recommendations.
+If a major non-conformity is found, give a recommendation in Recommendations, but do not show Observations.
+If no non-conformitiy is found, do not show Observations/Recommendations.
+
+RULE 3
+Make all observations in the Findings sections. Stat by stating the name of the file, give the evidence number then state the observations relative to the control, eg: "The Cryptography Policy [E003] is observed to define policies for maintaining an inventory of cryptographic materials". Always start the findings by listing relevant files in such a way.
+
+RULE 4
+If a non-conformity is observed, observe it first in the Findings, using the phrasing eg: "However, it is observed that no process exists for updating the Cryptography Policy".
+
+RULE 5
+Always start the Observations and Recommendations section with the wording "It is recommended that ...". Do not use strong verbs like shall or shold. Do not consult.
+
+RULE 6
+Reference filenames in findings using their titles with capitalization eg: "Change Management Policy" in a readable way, followed by the evidence number (E followed by three digits) surrounded in square brackets.
+
+RULE 7
+All files referenced in the Findings section must be documented in the Evidence section by giving the full filename including the file suffix eg: "E003_Cryptography_Policy.pdf". Write only that.
+`;
+
 export const DEFAULT_SETTINGS: AuditorSettings = {
-	indexFolder: '',
-	embeddingModel: 'Xenova/bge-small-en-v1.5',
+	geminiApiKey: '',
+	embeddingModel: 'gemini-embedding-2',
+	generationModel: 'gemini-3.6-flash',
+	standardsFolder: '',
+	evidenceFolder: '',
+	writtenControlsFolder: '',
 	maxResults: 10,
 	chunkWords: 300,
-	graphNotePath: 'Auditor Graph.md',
-	titleOnlyPaths: '',
+	defaultWritingRules: DEFAULT_WRITING_RULES,
 };
 
 export class AuditorSettingTab extends PluginSettingTab {
@@ -32,42 +74,94 @@ export class AuditorSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		new Setting(containerEl).setName('Vault auditor').setHeading();
+		new Setting(containerEl)
+			.setName('Gemini API key')
+			.setDesc(
+				'Used for both embedding and generation calls. Stored in plain text in this plugin\'s data.json, ' +
+				'same as any other plugin that holds an API key.',
+			)
+			.addText((text) => {
+				text.inputEl.type = 'password';
+				text
+					.setPlaceholder('AI...')
+					.setValue(this.plugin.settings.geminiApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.geminiApiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+			});
 
 		new Setting(containerEl)
-			.setName('Folder to index')
-			.setDesc(
-				'Vault folder path to index (leave empty for entire vault). E.g. "notes" or "projects/2024"',
-			)
+			.setName('Embedding model')
+			.setDesc('Gemini embedding model ID used to index standards, evidence, and written controls.')
 			.addText((text) =>
 				text
-					.setPlaceholder('E.g. Notes')
-					.setValue(this.plugin.settings.indexFolder)
+					// eslint-disable-next-line obsidianmd/ui/sentence-case -- literal model ID
+					.setPlaceholder('gemini-embedding-2')
+					.setValue(this.plugin.settings.embeddingModel)
 					.onChange(async (value) => {
-						this.plugin.settings.indexFolder = value.trim();
+						this.plugin.settings.embeddingModel = value.trim() || DEFAULT_SETTINGS.embeddingModel;
 						await this.plugin.saveSettings();
 					}),
 			);
 
 		new Setting(containerEl)
-			.setName('Embedding model')
-			.setDesc(
-				'HuggingFace model ID (must have ONNX files). Changing this requires re-indexing.',
-			)
+			.setName('Generation model')
+			.setDesc('Gemini model ID used to synthesize evidence-search queries and draft controls.')
 			.addText((text) =>
 				text
-					.setPlaceholder('Xenova/bge-small-en-v1.5')
-					.setValue(this.plugin.settings.embeddingModel)
+					// eslint-disable-next-line obsidianmd/ui/sentence-case -- literal model ID
+					.setPlaceholder('gemini-3.6-flash')
+					.setValue(this.plugin.settings.generationModel)
 					.onChange(async (value) => {
-						this.plugin.settings.embeddingModel =
-							value.trim() || DEFAULT_SETTINGS.embeddingModel;
+						this.plugin.settings.generationModel = value.trim() || DEFAULT_SETTINGS.generationModel;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Standards folder')
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- ETSI is an acronym
+			.setDesc('Vault folder containing the standards used for auditing (e.g. ETSI 119431).')
+			.addText((text) =>
+				text
+					.setPlaceholder('Standards')
+					.setValue(this.plugin.settings.standardsFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.standardsFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Evidence folder')
+			.setDesc('Vault folder containing audit evidence.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Evidence')
+					.setValue(this.plugin.settings.evidenceFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.evidenceFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Written controls folder')
+			.setDesc('Vault folder containing previously drafted controls, used as style references and as the save destination for new drafts.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Written controls')
+					.setValue(this.plugin.settings.writtenControlsFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.writtenControlsFolder = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);
 
 		new Setting(containerEl)
 			.setName('Max results')
-			.setDesc('Maximum number of results to show in the search view.')
+			.setDesc('Maximum number of results to retrieve per search step.')
 			.addSlider((slider) =>
 				slider
 					.setLimits(1, 30, 1)
@@ -80,40 +174,8 @@ export class AuditorSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Graph note path')
-			.setDesc('Markdown note used to persist the phrase/top-k list for the phrase graph view.')
-			.addText((text) =>
-				text
-					.setPlaceholder('Auditor Graph.md')
-					.setValue(this.plugin.settings.graphNotePath)
-					.onChange(async (value) => {
-						this.plugin.settings.graphNotePath = value.trim() || DEFAULT_SETTINGS.graphNotePath;
-						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName('Title-only paths')
-			.setDesc(
-				'One path pattern per line ("*" wildcard supported, e.g. "Logs/*" or "*.private.md"). ' +
-				'Matching files are indexed by title only — same as the "_" prefix rule, but for files you can\'t rename.',
-			)
-			.addTextArea((text) => {
-				text
-					.setPlaceholder('Logs/*\nDrafts/*.md')
-					.setValue(this.plugin.settings.titleOnlyPaths)
-					.onChange(async (value) => {
-						this.plugin.settings.titleOnlyPaths = value;
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.rows = 5;
-			});
-
-		new Setting(containerEl)
 			.setName('Chunk size (words)')
-			.setDesc(
-				'For long sections without sub-headings, approximate word count per chunk.',
-			)
+			.setDesc('Target paragraph-chunk size, in words, used when indexing.')
 			.addSlider((slider) =>
 				slider
 					.setLimits(100, 800, 50)
@@ -124,5 +186,20 @@ export class AuditorSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		new Setting(containerEl)
+			.setName('Default writing rules')
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Writing rules" names the pipeline step's own heading
+			.setDesc('Pre-filled in the control-drafting pipeline\'s "Writing rules" step; editable per-draft there.')
+			.addTextArea((text) => {
+				text
+					.setValue(this.plugin.settings.defaultWritingRules)
+					.onChange(async (value) => {
+						this.plugin.settings.defaultWritingRules = value || DEFAULT_SETTINGS.defaultWritingRules;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 16;
+				text.inputEl.addClass('auditor-rules-textarea');
+			});
 	}
 }

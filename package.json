@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
-	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"name": "obsidian-auditor",
+	"version": "1.1.0",
+	"description": "An Obsidian plugin for certificate audits AI powered",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
@@ -26,11 +26,8 @@
 		"typescript-eslint": "^8.59.1"
 	},
 	"dependencies": {
-		"@huggingface/transformers": "^4.2.0",
-		"@llm-tools/embedjs": "^0.1.31",
-		"@llm-tools/embedjs-libsql": "^0.1.31",
-		"@llm-tools/embedjs-llama-cpp": "^0.1.31",
-		"onnxruntime-web": "^1.26.0",
+		"@google/genai": "^1.0.0",
+		"mammoth": "^1.12.0",
 		"pdfjs-dist": "^4",
 		"vectra": "^0.15.0"
 	}
