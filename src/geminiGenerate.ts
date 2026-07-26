@@ -788,4 +788,83 @@ export class GeminiGenerate {
 		}
 		return { thinking, mapping, notes: parsed.notes };
 	}
+
+	/**
+	 * Step 1 of the chat flow: given the conversation so far and the auditor's latest message,
+	 * decides whether searching the vault would help at all, and if so, what kind of documents to
+	 * look for — expressed as a keyword-dense query suited to embedding retrieval, not just the raw
+	 * message. Runs *before* any RAG search — its output query is what actually gets searched.
+	 */
+	async planChatSearch(
+		history: { role: 'user' | 'assistant'; text: string }[],
+		question: string,
+	): Promise<{ thinking: string; shouldSearch: boolean; searchQuery: string }> {
+		const historyText = history
+			.map((m) => `${m.role === 'user' ? 'Auditor' : 'Assistant'}: ${m.text}`)
+			.join('\n\n');
+		const prompt = [
+			'You are planning the retrieval step for an auditor\'s chat message, before a vector-database',
+			'search of their vault (standards, evidence, written controls, interview evidence) runs.',
+			'',
+			'Decide whether searching the vault would actually help answer this message — false for',
+			'greetings, meta questions about the conversation itself, or anything answerable without',
+			'vault content. If true, write a keyword-dense search query describing what kind of',
+			'documents/content to look for: the concepts, terms, and phrases most likely to appear in',
+			'relevant passages — not simply the auditor\'s raw message restated.',
+			'',
+			...(historyText ? ['Conversation so far:', historyText, ''] : []),
+			`Auditor's latest message: ${question}`,
+		].join('\n');
+
+		const schema: Schema = {
+			type: Type.OBJECT,
+			properties: {
+				shouldSearch: {
+					type: Type.BOOLEAN,
+					description: 'Whether searching the vault would help answer this message.',
+				},
+				searchQuery: {
+					type: Type.STRING,
+					description: 'Keyword-dense search query describing what kind of documents to look for. Empty string if shouldSearch is false.',
+				},
+			},
+			required: ['shouldSearch', 'searchQuery'],
+		};
+
+		const { thinking, parsed } = await this.generateStructured<{ shouldSearch: boolean; searchQuery: string }>(prompt, schema);
+		return { thinking, ...parsed };
+	}
+
+	/**
+	 * Step 2 of the chat flow: free-form reply, grounded in RAG context retrieved (per the plan from
+	 * `planChatSearch`) across all indexes. Plain text in, plain text out — no structured output,
+	 * since chat replies aren't consumed programmatically.
+	 */
+	async chatWithRag(
+		history: { role: 'user' | 'assistant'; text: string }[],
+		retrievedContext: string,
+		question: string,
+	): Promise<string> {
+		const historyText = history
+			.map((m) => `${m.role === 'user' ? 'Auditor' : 'Assistant'}: ${m.text}`)
+			.join('\n\n');
+		const prompt = [
+			'You are an AI assistant helping an auditor explore their vault of standards, evidence,',
+			'written controls, and interview evidence.',
+			'',
+			'Answer the auditor\'s latest message using the retrieved context below when it\'s relevant.',
+			'If the context doesn\'t contain the answer, say so honestly rather than making things up.',
+			'Keep the conversation natural — you don\'t need to force in context that isn\'t relevant to',
+			'what was just asked.',
+			'',
+			...(historyText ? ['Conversation so far:', historyText, ''] : []),
+			'Retrieved context (top matches across all indexes):',
+			retrievedContext || '(no relevant context found)',
+			'',
+			`Auditor: ${question}`,
+			'',
+			'Assistant:',
+		].join('\n');
+		return this.generate(prompt);
+	}
 }

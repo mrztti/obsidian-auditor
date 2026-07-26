@@ -15,12 +15,13 @@ import {
 import { renderControlRecordFields } from './controlFields';
 import { EditControlModal } from './editControlModal';
 import { ImportControlsModal } from './importControlsModal';
+import { renderChatMarkdownInto } from './markdown';
 
 const GRAPH_WINDOW_SECONDS = 60;
 
 export const AUDITOR_VIEW_TYPE = 'auditor-main-view';
 
-type TabName = 'indexes' | 'search' | 'pipeline' | 'controls' | 'stage2';
+type TabName = 'indexes' | 'search' | 'pipeline' | 'controls' | 'stage2' | 'chat';
 
 const TAB_LABELS: Record<TabName, string> = {
 	indexes: 'Indexes',
@@ -28,9 +29,12 @@ const TAB_LABELS: Record<TabName, string> = {
 	pipeline: 'Control drafting',
 	controls: 'Controls',
 	stage2: 'Stage 2 evidence',
+	chat: 'Chat',
 };
 
 const DEFAULT_SEARCH_TOP_K = 20;
+/** Combined retrieval budget for the Chat tab, across all indexes (standards/evidence/written-controls/interview-evidence). */
+const CHAT_RETRIEVAL_TOP_K = 30;
 
 interface StepLogEntry {
 	label: string;
@@ -160,6 +164,12 @@ function buildFindingsText(state: PipelineState): string {
 	return parts.join('\n\n');
 }
 
+interface ChatMessage {
+	role: 'user' | 'assistant';
+	text: string;
+	/** Retrieved chunks used to ground this reply, shown as a collapsible "Sources" list — only set for assistant messages. */
+	sources?: { result: SearchResult; kind: StoreKind }[];
+}
 
 /**
  * Single full-tab view with three tabs: re-indexing controls, a one-shot Document search
@@ -175,6 +185,7 @@ export class AuditorView extends ItemView {
 	private unsubscribeThroughput: (() => void) | null = null;
 	/** When on, each pipeline step advances to the next automatically (using default selections) instead of waiting for the user to click "Continue" — up to the final draft step. */
 	private autoMode = false;
+	private chatMessages: ChatMessage[] = [];
 
 	constructor(leaf: WorkspaceLeaf, plugin: AuditorPlugin) {
 		super(leaf);
@@ -206,6 +217,7 @@ export class AuditorView extends ItemView {
 			pipeline: container.createDiv('auditor-tab-content'),
 			controls: container.createDiv('auditor-tab-content'),
 			stage2: container.createDiv('auditor-tab-content'),
+			chat: container.createDiv('auditor-tab-content'),
 		};
 
 		const tabButtons: Record<TabName, HTMLButtonElement> = {} as Record<TabName, HTMLButtonElement>;
@@ -228,6 +240,7 @@ export class AuditorView extends ItemView {
 		this.renderPipelineStart();
 		this.renderControlsTab(tabContents.controls);
 		this.renderStage2Tab(tabContents.stage2);
+		this.renderChatTab(tabContents.chat);
 
 		setActiveTab('indexes');
 	}
@@ -1316,5 +1329,101 @@ export class AuditorView extends ItemView {
 		onStep('Saving…');
 		const updated: ControlRecord = { ...record, toeConclusion: draft.toeConclusion, toeRating: draft.toeRating };
 		await this.app.vault.modify(file, buildControlNoteContent(updated));
+	}
+
+	// ─── Chat tab ────────────────────────────────────────────────────────────
+
+	/** Free-form chat with the LLM, grounded by RAG retrieval (top 30 combined) across every index on each message. */
+	private renderChatTab(container: HTMLElement): void {
+		const messagesEl = container.createDiv('auditor-chat-messages');
+		const inputRow = container.createDiv('auditor-chat-input-row');
+		const input = inputRow.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
+		input.rows = 3;
+		input.placeholder = 'Ask anything about your standards, evidence, written controls, or interview evidence…';
+		const sendBtn = inputRow.createEl('button', { text: 'Send', cls: 'mod-cta' });
+
+		const send = () => {
+			const question = input.value.trim();
+			if (!question) return;
+			input.value = '';
+			void this.runChatTurn(question, messagesEl, sendBtn);
+		};
+		sendBtn.addEventListener('click', send);
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				send();
+			}
+		});
+
+		this.renderChatMessages(messagesEl);
+	}
+
+	/** LLM replies are markdown, so render them (headings, lists, bold/italic, code, links) instead of dumping raw text. */
+	private renderChatMessages(messagesEl: HTMLElement): void {
+		messagesEl.empty();
+		for (const message of this.chatMessages) {
+			const row = messagesEl.createDiv(`auditor-chat-message auditor-chat-message-${message.role}`);
+			const textEl = row.createDiv('auditor-chat-message-text');
+			renderChatMarkdownInto(textEl, message.text);
+			if (message.sources && message.sources.length > 0) {
+				const sourcesEl = row.createEl('details', { cls: 'auditor-thinking' });
+				sourcesEl.createEl('summary', { text: `Sources (${message.sources.length})` });
+				const list = sourcesEl.createDiv('auditor-search-files-list');
+				for (const { result, kind } of message.sources) {
+					const item = list.createDiv('auditor-search-file-item');
+					this.createFileLink(item, result);
+					item.createSpan({ text: ` — ${SEARCH_STORE_LABELS[kind]}`, cls: 'auditor-control-number' });
+				}
+			}
+		}
+		messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+	}
+
+	/** Searches every index with the same query and merges results by score, capped at CHAT_RETRIEVAL_TOP_K combined. */
+	private async retrieveChatContext(query: string): Promise<{ result: SearchResult; kind: StoreKind }[]> {
+		const kinds: StoreKind[] = ['standards', 'evidence', 'writtenControls', 'interviewEvidence'];
+		const perStore = await Promise.all(
+			kinds.map((kind) => this.plugin.storeFor(kind).search(query, CHAT_RETRIEVAL_TOP_K)),
+		);
+		const combined = perStore.flatMap((results, i) => results.map((result) => ({ result, kind: kinds[i]! })));
+		combined.sort((a, b) => b.result.score - a.result.score);
+		return combined.slice(0, CHAT_RETRIEVAL_TOP_K);
+	}
+
+	private async runChatTurn(question: string, messagesEl: HTMLElement, sendBtn: HTMLButtonElement): Promise<void> {
+		this.chatMessages.push({ role: 'user', text: question });
+		this.renderChatMessages(messagesEl);
+
+		sendBtn.disabled = true;
+		const statusEl = this.showStatus(messagesEl, 'Planning search…');
+		try {
+			const history = this.chatMessages.slice(0, -1).map((m) => ({ role: m.role, text: m.text }));
+
+			// Step 1: decide whether/what to search for — a keyword-dense query, not just the raw message.
+			const plan = await this.plugin.geminiGenerate.planChatSearch(history, question);
+
+			// Step 2: run the RAG search (if the plan calls for it) using that query.
+			let sources: { result: SearchResult; kind: StoreKind }[] = [];
+			if (plan.shouldSearch && plan.searchQuery) {
+				statusEl.setText('Searching your vault…');
+				sources = await this.retrieveChatContext(plan.searchQuery);
+			}
+
+			// Step 3: final answer, grounded in the compounded retrieved context.
+			statusEl.setText('Thinking…');
+			const contextText = sources
+				.map(({ result, kind }) => `[${SEARCH_STORE_LABELS[kind]} — ${sourceLabel(result)}]\n${result.text}`)
+				.join('\n\n');
+			const answer = await this.plugin.geminiGenerate.chatWithRag(history, contextText, question);
+
+			statusEl.remove();
+			this.chatMessages.push({ role: 'assistant', text: answer, sources });
+			this.renderChatMessages(messagesEl);
+		} catch (e) {
+			statusEl.setText(`Failed: ${String(e)}`);
+		} finally {
+			sendBtn.disabled = false;
+		}
 	}
 }

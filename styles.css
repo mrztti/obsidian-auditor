@@ -733,3 +733,58 @@ a.auditor-search-file-item {
 	font-size: 0.8em;
 	color: var(--text-muted);
 }
+
+.auditor-chat-messages {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-height: 200px;
+	max-height: 60vh;
+	overflow-y: auto;
+	padding: 4px 2px;
+}
+
+.auditor-chat-message {
+	max-width: 85%;
+	padding: 8px 12px;
+	border-radius: 10px;
+	background: var(--background-secondary);
+}
+
+.auditor-chat-message-user {
+	align-self: flex-end;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.auditor-chat-message-assistant {
+	align-self: flex-start;
+}
+
+.auditor-chat-message-text {
+	overflow-wrap: anywhere;
+}
+
+.auditor-chat-message-text > :first-child {
+	margin-top: 0;
+}
+
+.auditor-chat-message-text > :last-child {
+	margin-bottom: 0;
+}
+
+.auditor-chat-message-user .auditor-chat-message-text a {
+	color: inherit;
+	text-decoration: underline;
+}
+
+.auditor-chat-input-row {
+	display: flex;
+	gap: 8px;
+	align-items: flex-end;
+	margin-top: 10px;
+}
+
+.auditor-chat-input-row textarea {
+	flex: 1;
+}
