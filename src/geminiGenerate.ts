@@ -214,8 +214,8 @@ export interface DraftedControl {
 	thinking: string;
 	standard: string;
 	topic: string;
-	todFinding: string;
-	todRecommendation: string;
+	/** The full Stage 1 conclusion block, following the writing rules exactly — Findings, Observations/Recommendations, and Evidence sub-parts all belong inside this one block. */
+	todConclusion: string;
 	/** C = conform, C* = conform but with observation, NC = non-conform with recommendation. */
 	todRating: 'C' | 'C*' | 'NC';
 }
@@ -233,15 +233,10 @@ const DRAFT_CONTROL_SCHEMA: Schema = {
 			description:
 				'A short topic label for this control, e.g. "Device Management".',
 		},
-		todFinding: {
+		todConclusion: {
 			type: Type.STRING,
 			description:
-				'The Test of Design finding, following the writing rules exactly. Nothing except what the rules produce.',
-		},
-		todRecommendation: {
-			type: Type.STRING,
-			description:
-				'The Test of Design recommendation, following the writing rules exactly. Empty string if the rating is "C" (fully conform, nothing to recommend).',
+				'The full Test of Design conclusion block, following the writing rules exactly (Findings, then Observations/Recommendations, then Evidence, as sub-parts of this one block). Nothing except what the rules produce.',
 		},
 		todRating: {
 			type: Type.STRING,
@@ -253,8 +248,7 @@ const DRAFT_CONTROL_SCHEMA: Schema = {
 	required: [
 		'standard',
 		'topic',
-		'todFinding',
-		'todRecommendation',
+		'todConclusion',
 		'todRating',
 	],
 };
@@ -565,7 +559,7 @@ export class GeminiGenerate {
 	}
 
 	/**
-	 * Drafts the Test of Design finding/recommendation/rating from the accumulated, user-curated
+	 * Drafts the Test of Design conclusion block + rating from the accumulated, user-curated
 	 * retrieval context, strictly following the given writing rules for phrasing, and separately
 	 * identifies the standard + topic for the control record's own fields.
 	 */
@@ -577,16 +571,16 @@ export class GeminiGenerate {
 		guidance: string,
 	): Promise<DraftedControl> {
 		const prompt = [
-			'You are an auditor drafting the Test of Design assessment for a control.',
+			'You are an auditor drafting the Test of Design conclusion for a control.',
 			'Use the control understanding, the evidence found in the vault, and the style of',
-			'previously written controls to draft the finding and (if needed) recommendation.',
+			'previously written controls to draft it.',
 			'',
-			'You MUST follow the writing rules below exactly for phrasing and structure — they define',
-			'how the finding and recommendation must be worded. The "todFinding" field must contain',
-			'only the finding content (what RULE 3/RULE 4 would put under "Findings:"); the',
-			'"todRecommendation" field must contain only the recommendation content (what RULE 2/RULE 5',
-			'would put under "Observations/Recommendations:"), or an empty string if the rating is "C".',
-			'Neither field should contain the section headings themselves, only their content.',
+			'You MUST follow the writing rules below exactly for phrasing and structure. The',
+			'"todConclusion" field is the ENTIRE conclusion block as one piece of text — it must',
+			'contain all of the sub-parts the writing rules define (e.g. Findings, then',
+			'Observations/Recommendations, then Evidence), each properly labeled within that single',
+			'block exactly as the rules specify. Do not split these into separate fields or omit any',
+			'sub-part the rules require.',
 			'',
 			'Decide the todRating: "C" if fully conform with no issues, "C*" if conform but with a',
 			'minor observation, "NC" if a non-conformity requiring a recommendation was found.',

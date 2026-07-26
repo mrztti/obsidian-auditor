@@ -952,8 +952,7 @@ export class AuditorView extends ItemView {
 				...this.pipelineState.draftRecord,
 				standard: drafted.standard,
 				topic: drafted.topic,
-				todFinding: drafted.todFinding,
-				todRecommendation: drafted.todRecommendation,
+				todConclusion: drafted.todConclusion,
 				todRating: drafted.todRating,
 			};
 			this.logStep('Drafted the control');

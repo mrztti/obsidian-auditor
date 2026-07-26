@@ -595,6 +595,19 @@ a.auditor-search-file-item {
 	padding: 4px 2px 12px;
 }
 
+/** Same sizing as .auditor-edit-modal, but for modals without a tab bar — the whole body scrolls directly instead of relying on a .auditor-tab-content child. */
+.auditor-large-modal {
+	width: 90vw;
+	height: 90vh;
+	max-width: 90vw;
+	max-height: 90vh;
+}
+
+.auditor-large-modal .modal-content {
+	height: 100%;
+	overflow-y: auto;
+}
+
 .auditor-field {
 	display: flex;
 	flex-direction: column;

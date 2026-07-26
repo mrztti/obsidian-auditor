@@ -21,19 +21,19 @@ export interface ControlRecord {
 	session: string;
 	assignedMember: string;
 	status: string;
-	todFinding: string;
-	todRecommendation: string;
+	/** Free-text Stage 1 conclusion block — the user (or the draft step) writes the whole thing, including whatever Findings/Observations-Recommendations/Evidence sub-parts belong in it. */
+	todConclusion: string;
 	todRating: ControlRating;
-	toeFinding: string;
-	toeRecommendation: string;
+	/** Free-text Stage 2 conclusion block, same idea as `todConclusion`. */
+	toeConclusion: string;
 	toeRating: ControlRating;
 	comments: string;
 }
 
 export const CONTROL_FIELD_KEYS = [
 	'number', 'standard', 'topic', 'control', 'session', 'assignedMember', 'status',
-	'todFinding', 'todRecommendation', 'todRating',
-	'toeFinding', 'toeRecommendation', 'toeRating',
+	'todConclusion', 'todRating',
+	'toeConclusion', 'toeRating',
 	'comments',
 ] as const;
 
@@ -48,11 +48,9 @@ export function emptyControlRecord(number = ''): ControlRecord {
 		session: '',
 		assignedMember: '',
 		status: 'To-Do',
-		todFinding: '',
-		todRecommendation: '',
+		todConclusion: '',
 		todRating: '',
-		toeFinding: '',
-		toeRecommendation: '',
+		toeConclusion: '',
 		toeRating: '',
 		comments: '',
 	};
@@ -75,10 +73,6 @@ export function sanitizeFileTitle(title: string, maxLength = 80): string {
 	return cleaned || 'Untitled control';
 }
 
-function findingRecommendationBlock(finding: string, recommendation: string): string {
-	return [`Finding:\n${finding}`, '', `Recommendation:\n${recommendation}`].join('\n');
-}
-
 export function buildControlNoteContent(record: ControlRecord): string {
 	return [
 		'## Standard', '', record.standard, '',
@@ -89,23 +83,13 @@ export function buildControlNoteContent(record: ControlRecord): string {
 		'## Status', '', record.status, '',
 		'## ', '',
 		'## Test of Design (Stage 1)', '',
-		findingRecommendationBlock(record.todFinding, record.todRecommendation), '',
+		record.todConclusion, '',
 		'## ToD Rating', '', record.todRating, '',
 		'## Test of Effectiveness (Stage 2)', '',
-		findingRecommendationBlock(record.toeFinding, record.toeRecommendation), '',
+		record.toeConclusion, '',
 		'## ToE Rating', '', record.toeRating, '',
 		'## Comments', '', record.comments,
 	].join('\n');
-}
-
-/** Parses a Finding:/Recommendation: block back into its two parts. */
-function parseFindingRecommendation(text: string): { finding: string; recommendation: string } {
-	const findingMatch = /Finding:\s*([\s\S]*?)(?:\n *Recommendation:|$)/.exec(text);
-	const recommendationMatch = /Recommendation:\s*([\s\S]*)$/.exec(text);
-	return {
-		finding: findingMatch?.[1]?.trim() ?? '',
-		recommendation: recommendationMatch?.[1]?.trim() ?? '',
-	};
 }
 
 /** Parses the canonical control-note markdown back into a record. `fallbackNumber` is used when the content has no explicit number heading (the filename itself is the number). */
@@ -128,9 +112,6 @@ export function parseControlNoteContent(content: string, fallbackNumber = ''): C
 	}
 	flush();
 
-	const tod = parseFindingRecommendation(sections.get('Test of Design (Stage 1)') ?? '');
-	const toe = parseFindingRecommendation(sections.get('Test of Effectiveness (Stage 2)') ?? '');
-
 	return {
 		number: fallbackNumber,
 		standard: sections.get('Standard') ?? '',
@@ -139,11 +120,9 @@ export function parseControlNoteContent(content: string, fallbackNumber = ''): C
 		session: sections.get('Session') ?? '',
 		assignedMember: sections.get('Assigned Member') ?? '',
 		status: sections.get('Status') ?? '',
-		todFinding: tod.finding,
-		todRecommendation: tod.recommendation,
+		todConclusion: sections.get('Test of Design (Stage 1)') ?? '',
 		todRating: (sections.get('ToD Rating') ?? '').trim() as ControlRating,
-		toeFinding: toe.finding,
-		toeRecommendation: toe.recommendation,
+		toeConclusion: sections.get('Test of Effectiveness (Stage 2)') ?? '',
 		toeRating: (sections.get('ToE Rating') ?? '').trim() as ControlRating,
 		comments: sections.get('Comments') ?? '',
 	};

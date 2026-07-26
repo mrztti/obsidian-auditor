@@ -23,11 +23,9 @@ const FIELD_LABELS: Record<ControlFieldKey, string> = {
 	session: 'Session',
 	assignedMember: 'Assigned member',
 	status: 'Status',
-	todFinding: 'ToD finding',
-	todRecommendation: 'ToD recommendation',
+	todConclusion: 'ToD conclusion',
 	todRating: 'ToD rating',
-	toeFinding: 'ToE finding',
-	toeRecommendation: 'ToE recommendation',
+	toeConclusion: 'ToE conclusion',
 	toeRating: 'ToE rating',
 	comments: 'Comments',
 };
@@ -50,7 +48,7 @@ export class ImportControlsModal extends Modal {
 		super(app);
 		this.plugin = plugin;
 		this.onComplete = onComplete;
-		this.modalEl.addClass('auditor-edit-modal');
+		this.modalEl.addClass('auditor-large-modal');
 		this.setTitle('Import controls from spreadsheet');
 	}
 

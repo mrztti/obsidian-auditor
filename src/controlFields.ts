@@ -75,15 +75,13 @@ export function renderGeneralFields(container: HTMLElement, record: ControlRecor
 
 export function renderStage1Fields(container: HTMLElement, record: ControlRecord, onChange: () => void = () => {}): void {
 	const { textArea, dropdown } = createFieldHelpers(container, onChange);
-	textArea('Finding', 8, () => record.todFinding, (v) => { record.todFinding = v; });
-	textArea('Recommendation', 5, () => record.todRecommendation, (v) => { record.todRecommendation = v; });
+	textArea('Conclusion', 12, () => record.todConclusion, (v) => { record.todConclusion = v; });
 	dropdown('ToD rating', CONTROL_RATINGS, () => record.todRating, (v) => { record.todRating = v as ControlRecord['todRating']; });
 }
 
 export function renderStage2Fields(container: HTMLElement, record: ControlRecord, onChange: () => void = () => {}): void {
 	const { textArea, dropdown } = createFieldHelpers(container, onChange);
-	textArea('Finding', 8, () => record.toeFinding, (v) => { record.toeFinding = v; });
-	textArea('Recommendation', 5, () => record.toeRecommendation, (v) => { record.toeRecommendation = v; });
+	textArea('Conclusion', 12, () => record.toeConclusion, (v) => { record.toeConclusion = v; });
 	dropdown('ToE rating', CONTROL_RATINGS, () => record.toeRating, (v) => { record.toeRating = v as ControlRecord['toeRating']; });
 }
 
