@@ -253,6 +253,32 @@ const DRAFT_CONTROL_SCHEMA: Schema = {
 	],
 };
 
+export interface DraftedStage2 {
+	thinking: string;
+	/** The full Stage 2 (Test of Effectiveness) conclusion block — same idea as `DraftedControl.todConclusion`: one piece of text containing whatever Findings/Observations-Recommendations/Evidence sub-parts the writing rules require. */
+	toeConclusion: string;
+	/** C = conform, C* = conform but with observation, NC = non-conform with recommendation. */
+	toeRating: 'C' | 'C*' | 'NC';
+}
+
+const DRAFT_STAGE2_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		toeConclusion: {
+			type: Type.STRING,
+			description:
+				'The full Test of Effectiveness conclusion block, following the writing rules exactly (Findings, then Observations/Recommendations, then Evidence, as sub-parts of this one block). Nothing except what the rules produce.',
+		},
+		toeRating: {
+			type: Type.STRING,
+			enum: ['C', 'C*', 'NC'],
+			description:
+				'C = conform, no issues. C* = conform but with an observation/minor note. NC = non-conform, a recommendation is required.',
+		},
+	},
+	required: ['toeConclusion', 'toeRating'],
+};
+
 const RERANK_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
@@ -613,6 +639,75 @@ export class GeminiGenerate {
 		const { thinking, parsed } = await this.generateStructured<
 			Omit<DraftedControl, 'thinking'>
 		>(prompt, DRAFT_CONTROL_SCHEMA);
+		return { thinking, ...parsed };
+	}
+
+	/**
+	 * Drafts the Test of Effectiveness (Stage 2) conclusion block + rating for a control that
+	 * already has its Stage 1 conclusion written. Unlike `draftControl`, the citable evidence here
+	 * comes from interview evidence (not general audit evidence) plus other related written
+	 * controls; supporting standards are also fetched via RAG, but purely so the model understands
+	 * the requirement — never the standards/evidence stores as *evidence* for the conclusion.
+	 */
+	async draftStage2Control(
+		controlText: string,
+		stage1Context: string,
+		standardsContext: string,
+		interviewEvidenceContext: string,
+		relatedControlsContext: string,
+		writingRules: string,
+		guidance: string,
+	): Promise<DraftedStage2> {
+		const prompt = [
+			'You are an auditor drafting the Test of Effectiveness (Stage 2) conclusion for a control',
+			'that has already passed Test of Design. Test of Effectiveness verifies, via interview',
+			'evidence, that the control actually operates as designed in practice.',
+			'',
+			'You MUST follow the writing rules below exactly for phrasing and structure. The',
+			'"toeConclusion" field is the ENTIRE conclusion block as one piece of text — it must',
+			'contain all of the sub-parts the writing rules define (e.g. Findings, then',
+			'Observations/Recommendations, then Evidence), each properly labeled within that single',
+			'block exactly as the rules specify. Do not split these into separate fields or omit any',
+			'sub-part the rules require.',
+			'',
+			'Decide the toeRating: "C" if fully conform with no issues, "C*" if conform but with a',
+			'minor observation, "NC" if a non-conformity requiring a recommendation was found.',
+			'',
+			'The supporting standards below are given ONLY so you correctly understand what the control',
+			'requires — never cite them as evidence in the Evidence section; only interview evidence and',
+			'related controls may be cited there.',
+			'',
+			'Writing rules:',
+			writingRules,
+			'',
+			...(guidance
+				? [
+						'Additional guidance for finalizing this report:',
+						guidance,
+						'',
+					]
+				: []),
+			'Control:',
+			controlText,
+			'',
+			'Stage 1 (Test of Design) conclusion, for context:',
+			stage1Context || '(none)',
+			'',
+			'Supporting standards (context only, not citable evidence):',
+			standardsContext || '(none selected)',
+			'',
+			'Interview evidence:',
+			interviewEvidenceContext || '(none selected)',
+			'',
+			'Related previously written controls (style reference):',
+			relatedControlsContext || '(none selected)',
+			'',
+			'Draft the Test of Effectiveness conclusion now, following the writing rules exactly.',
+		].join('\n');
+
+		const { thinking, parsed } = await this.generateStructured<
+			Omit<DraftedStage2, 'thinking'>
+		>(prompt, DRAFT_STAGE2_SCHEMA);
 		return { thinking, ...parsed };
 	}
 

@@ -15,13 +15,14 @@ import { buildControlNoteContent, sanitizeFileTitle, type ControlRecord } from '
 
 const log = (...args: unknown[]) => console.debug('[Auditor]', ...args);
 
-export type StoreKind = 'standards' | 'evidence' | 'writtenControls';
+export type StoreKind = 'standards' | 'evidence' | 'writtenControls' | 'interviewEvidence';
 
 export default class AuditorPlugin extends Plugin {
 	settings!: AuditorSettings;
 	standardsIndex!: AuditVectorStore;
 	evidenceIndex!: AuditVectorStore;
 	writtenControlsIndex!: AuditVectorStore;
+	interviewEvidenceIndex!: AuditVectorStore;
 	geminiGenerate!: GeminiGenerate;
 	fileExplorerDecorator!: FileExplorerDecorator;
 	rateLimiter!: RateLimiter;
@@ -60,6 +61,12 @@ export default class AuditorPlugin extends Plugin {
 		this.writtenControlsIndex = new AuditVectorStore(
 			embeddings,
 			`${dataRoot}/vector-index/written-controls`,
+			this.settings.chunkWords,
+			this.settings.maxConcurrentIndexing,
+		);
+		this.interviewEvidenceIndex = new AuditVectorStore(
+			embeddings,
+			`${dataRoot}/vector-index/interview-evidence`,
 			this.settings.chunkWords,
 			this.settings.maxConcurrentIndexing,
 		);
@@ -146,6 +153,14 @@ export default class AuditorPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: 'reindex-interview-evidence',
+			name: 'Re-index interview evidence',
+			callback: () => {
+				void this.runIndexing('interviewEvidence');
+			},
+		});
+
 		this.addSettingTab(new AuditorSettingTab(this.app, this));
 	}
 
@@ -168,12 +183,13 @@ export default class AuditorPlugin extends Plugin {
 	storeFor(kind: StoreKind): AuditVectorStore {
 		if (kind === 'standards') return this.standardsIndex;
 		if (kind === 'evidence') return this.evidenceIndex;
+		if (kind === 'interviewEvidence') return this.interviewEvidenceIndex;
 		return this.writtenControlsIndex;
 	}
 
-	/** Applies the current `maxConcurrentIndexing` setting to all three stores; called whenever the setting changes. */
+	/** Applies the current `maxConcurrentIndexing` setting to all stores; called whenever the setting changes. */
 	updateIndexingConcurrency(): void {
-		for (const kind of ['standards', 'evidence', 'writtenControls'] as StoreKind[]) {
+		for (const kind of ['standards', 'evidence', 'writtenControls', 'interviewEvidence'] as StoreKind[]) {
 			this.storeFor(kind).setMaxConcurrentFiles(this.settings.maxConcurrentIndexing);
 		}
 	}
@@ -181,12 +197,14 @@ export default class AuditorPlugin extends Plugin {
 	private folderFor(kind: StoreKind): string {
 		if (kind === 'standards') return this.settings.standardsFolder;
 		if (kind === 'evidence') return this.settings.evidenceFolder;
+		if (kind === 'interviewEvidence') return this.settings.interviewEvidenceFolder;
 		return this.settings.writtenControlsFolder;
 	}
 
 	private labelFor(kind: StoreKind): string {
 		if (kind === 'standards') return 'Standards';
 		if (kind === 'evidence') return 'Evidence';
+		if (kind === 'interviewEvidence') return 'Interview evidence';
 		return 'Written controls';
 	}
 

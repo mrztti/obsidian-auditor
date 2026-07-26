@@ -261,6 +261,65 @@ a.auditor-search-file-item {
 	color: var(--text-muted);
 }
 
+.auditor-stage2-checklist {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 8px;
+}
+
+.auditor-stage2-checklist-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 4px 6px;
+	border-radius: 4px;
+}
+
+.auditor-stage2-checklist-row:hover {
+	background: var(--background-secondary);
+}
+
+.auditor-stage2-row-meta {
+	font-size: 0.85em;
+	color: var(--text-muted);
+}
+
+.auditor-chip {
+	font-size: 0.75em;
+	padding: 1px 8px;
+	border-radius: 10px;
+	margin-left: auto;
+}
+
+.auditor-chip-has-stage2 {
+	background: var(--color-green, #4caf50);
+	color: #fff;
+}
+
+.auditor-stage2-progress {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 12px;
+}
+
+.auditor-step-done,
+.auditor-step-failed {
+	width: 10px;
+	height: 10px;
+	flex-shrink: 0;
+	border-radius: 50%;
+}
+
+.auditor-step-done {
+	background: var(--color-green, #4caf50);
+}
+
+.auditor-step-failed {
+	background: var(--color-red, #e53935);
+}
+
 .auditor-pipeline-step {
 	display: flex;
 	flex-direction: column;

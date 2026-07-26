@@ -32,21 +32,23 @@ export class FileExplorerDecorator {
 
 	async refresh(): Promise<void> {
 		const plugin = this.plugin;
-		const [standardsOk, evidenceOk, writtenOk, standardsErr, evidenceErr, writtenErr] = await Promise.all([
+		const [standardsOk, evidenceOk, writtenOk, interviewOk, standardsErr, evidenceErr, writtenErr, interviewErr] = await Promise.all([
 			plugin.standardsIndex.getIndexedPaths(),
 			plugin.evidenceIndex.getIndexedPaths(),
 			plugin.writtenControlsIndex.getIndexedPaths(),
+			plugin.interviewEvidenceIndex.getIndexedPaths(),
 			plugin.standardsIndex.getErroredPaths(),
 			plugin.evidenceIndex.getErroredPaths(),
 			plugin.writtenControlsIndex.getErroredPaths(),
+			plugin.interviewEvidenceIndex.getErroredPaths(),
 		]);
 
 		const states = new Map<string, DotState>();
-		for (const path of [...standardsOk, ...evidenceOk, ...writtenOk]) {
+		for (const path of [...standardsOk, ...evidenceOk, ...writtenOk, ...interviewOk]) {
 			states.set(path, { kind: 'indexed' });
 		}
 		// Errors take priority over a stale "indexed" state from a previous successful run.
-		for (const [path, message] of Object.entries({ ...standardsErr, ...evidenceErr, ...writtenErr })) {
+		for (const [path, message] of Object.entries({ ...standardsErr, ...evidenceErr, ...writtenErr, ...interviewErr })) {
 			states.set(path, { kind: 'error', message });
 		}
 

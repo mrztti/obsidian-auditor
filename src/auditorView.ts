@@ -20,13 +20,14 @@ const GRAPH_WINDOW_SECONDS = 60;
 
 export const AUDITOR_VIEW_TYPE = 'auditor-main-view';
 
-type TabName = 'indexes' | 'search' | 'pipeline' | 'controls';
+type TabName = 'indexes' | 'search' | 'pipeline' | 'controls' | 'stage2';
 
 const TAB_LABELS: Record<TabName, string> = {
 	indexes: 'Indexes',
 	search: 'Document search',
 	pipeline: 'Control drafting',
 	controls: 'Controls',
+	stage2: 'Stage 2 evidence',
 };
 
 const DEFAULT_SEARCH_TOP_K = 20;
@@ -112,6 +113,7 @@ const SEARCH_STORE_LABELS: Record<StoreKind, string> = {
 	standards: 'Standards',
 	evidence: 'Evidence',
 	writtenControls: 'Written controls',
+	interviewEvidence: 'Interview evidence',
 };
 
 function sourceLabel(result: SearchResult): string {
@@ -158,6 +160,7 @@ function buildFindingsText(state: PipelineState): string {
 	return parts.join('\n\n');
 }
 
+
 /**
  * Single full-tab view with three tabs: re-indexing controls, a one-shot Document search
  * (keyword synthesis → RAG → LLM reranking with thinking), and the manual
@@ -202,6 +205,7 @@ export class AuditorView extends ItemView {
 			search: container.createDiv('auditor-tab-content'),
 			pipeline: container.createDiv('auditor-tab-content'),
 			controls: container.createDiv('auditor-tab-content'),
+			stage2: container.createDiv('auditor-tab-content'),
 		};
 
 		const tabButtons: Record<TabName, HTMLButtonElement> = {} as Record<TabName, HTMLButtonElement>;
@@ -223,6 +227,7 @@ export class AuditorView extends ItemView {
 		this.pipelineEl = tabContents.pipeline;
 		this.renderPipelineStart();
 		this.renderControlsTab(tabContents.controls);
+		this.renderStage2Tab(tabContents.stage2);
 
 		setActiveTab('indexes');
 	}
@@ -238,6 +243,7 @@ export class AuditorView extends ItemView {
 		this.createReindexButton(reindexRow, 'Re-index standards', 'standards');
 		this.createReindexButton(reindexRow, 'Re-index evidence', 'evidence');
 		this.createReindexButton(reindexRow, 'Re-index written controls', 'writtenControls');
+		this.createReindexButton(reindexRow, 'Re-index interview evidence', 'interviewEvidence');
 
 		const rateRow = container.createDiv('auditor-rate-row');
 		const rampLabel = rateRow.createEl('label', { cls: 'auditor-search-store-option' });
@@ -1165,5 +1171,150 @@ export class AuditorView extends ItemView {
 				cls: 'auditor-evidence-chip-passage',
 			});
 		});
+	}
+
+	// ─── Stage 2 evidence tab ───────────────────────────────────────────────
+
+	/**
+	 * Batch Stage 2 flow: pick any number of controls via checklist, then run the entire
+	 * pipeline (standards → interview evidence → related controls → draft → save) for every
+	 * selected control fully automatically, concurrently (bounded by `maxConcurrentStage2`). The
+	 * UI only ever shows each control's current step, never the full intermediate results.
+	 */
+	private renderStage2Tab(container: HTMLElement): void {
+		const toolbar = container.createDiv('auditor-controls-toolbar');
+		const refreshBtn = toolbar.createEl('button', { text: 'Refresh' });
+		const runBtn = toolbar.createEl('button', { text: 'Run selected', cls: 'mod-cta' });
+		runBtn.disabled = true;
+
+		const status = container.createDiv();
+		const checklistEl = container.createDiv('auditor-stage2-checklist');
+		const progressEl = container.createDiv('auditor-stage2-progress');
+
+		let entries: { file: TFile; record: ControlRecord }[] = [];
+		const selected = new Set<string>();
+
+		const renderChecklist = () => {
+			checklistEl.empty();
+			for (const entry of entries) {
+				const row = checklistEl.createDiv('auditor-stage2-checklist-row');
+				const checkbox = row.createEl('input', { type: 'checkbox' });
+				checkbox.checked = selected.has(entry.file.path);
+				checkbox.addEventListener('change', () => {
+					if (checkbox.checked) selected.add(entry.file.path);
+					else selected.delete(entry.file.path);
+					runBtn.disabled = selected.size === 0;
+				});
+				row.createSpan({ text: entry.record.number || '(no number)', cls: 'auditor-control-card-number' });
+				row.createSpan({ text: entry.record.standard, cls: 'auditor-stage2-row-meta' });
+				row.createSpan({ text: entry.record.topic, cls: 'auditor-stage2-row-meta' });
+				if (entry.record.toeConclusion.trim()) {
+					row.createSpan({ text: 'Has Stage 2', cls: 'auditor-chip auditor-chip-has-stage2' });
+				}
+			}
+		};
+
+		const load = async () => {
+			status.setText('Loading controls…');
+			const folder = this.plugin.settings.writtenControlsFolder;
+			const files = this.app.vault.getFiles()
+				.filter((f) => f.extension === 'md' && (!folder || f.path === folder || f.path.startsWith(`${folder}/`)));
+			const loaded: { file: TFile; record: ControlRecord }[] = [];
+			for (const file of files) {
+				const content = await this.app.vault.cachedRead(file);
+				loaded.push({ file, record: parseControlNoteContent(content, file.basename) });
+			}
+			loaded.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
+			entries = loaded;
+			status.setText(`${entries.length} control(s).`);
+			renderChecklist();
+		};
+
+		refreshBtn.addEventListener('click', () => { void load(); });
+		runBtn.addEventListener('click', () => {
+			const targets = entries.filter((e) => selected.has(e.file.path));
+			void this.runStage2Batch(targets, progressEl, runBtn);
+		});
+
+		void load();
+	}
+
+	/** Runs the full automatic Stage 2 pipeline for every target control, `maxConcurrentStage2` at a time, writing each conclusion straight to its file. */
+	private async runStage2Batch(
+		targets: { file: TFile; record: ControlRecord }[],
+		progressEl: HTMLElement,
+		runBtn: HTMLButtonElement,
+	): Promise<void> {
+		if (targets.length === 0) return;
+		runBtn.disabled = true;
+		progressEl.empty();
+
+		const rowRefs = new Map<string, { spinner: HTMLElement; label: HTMLElement }>();
+		for (const { file } of targets) {
+			const row = progressEl.createDiv('auditor-active-file-row');
+			const spinner = row.createDiv('auditor-spinner');
+			const label = row.createSpan({ text: `${file.basename}: Queued…` });
+			rowRefs.set(file.path, { spinner, label });
+		}
+
+		let anySaved = false;
+		let cursor = 0;
+		const worker = async (): Promise<void> => {
+			while (cursor < targets.length) {
+				const target = targets[cursor++]!;
+				const refs = rowRefs.get(target.file.path)!;
+				const setStep = (text: string) => { refs.label.setText(`${target.file.basename}: ${text}`); };
+				try {
+					await this.runStage2Auto(target.file, target.record, setStep);
+					anySaved = true;
+					setStep('Done');
+					refs.spinner.removeClass('auditor-spinner');
+					refs.spinner.addClass('auditor-step-done');
+				} catch (e) {
+					setStep(`Failed: ${String(e)}`);
+					refs.spinner.removeClass('auditor-spinner');
+					refs.spinner.addClass('auditor-step-failed');
+				}
+			}
+		};
+
+		const workerCount = Math.max(1, Math.min(this.plugin.settings.maxConcurrentStage2, targets.length));
+		await Promise.all(Array.from({ length: workerCount }, worker));
+
+		if (anySaved) void this.plugin.runIndexing('writtenControls');
+		runBtn.disabled = false;
+	}
+
+	/** One control's full Stage 2 pipeline: supporting-standards + interview-evidence + related-controls RAG (all results used, none manually curated), draft, then save straight to the file. */
+	private async runStage2Auto(file: TFile, record: ControlRecord, onStep: (text: string) => void): Promise<void> {
+		const query = [record.control, record.todConclusion].filter(Boolean).join('\n\n');
+
+		onStep('Searching standards…');
+		const standardsResults = await this.plugin.standardsIndex.search(query, this.plugin.settings.maxResults);
+
+		onStep('Searching interview evidence…');
+		const interviewResults = await this.plugin.interviewEvidenceIndex.search(query, this.plugin.settings.maxResults);
+
+		onStep('Searching related controls…');
+		const relatedRaw = await this.plugin.writtenControlsIndex.search(query, this.plugin.settings.maxResults + 1);
+		const relatedResults = relatedRaw.filter((r) => r.sourcePath !== file.path);
+
+		onStep('Drafting…');
+		const standardsContext = standardsResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+		const interviewContext = interviewResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+		const relatedContext = relatedResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+		const draft = await this.plugin.geminiGenerate.draftStage2Control(
+			record.control,
+			record.todConclusion,
+			standardsContext,
+			interviewContext,
+			relatedContext,
+			this.plugin.settings.defaultStage2WritingRules,
+			'',
+		);
+
+		onStep('Saving…');
+		const updated: ControlRecord = { ...record, toeConclusion: draft.toeConclusion, toeRating: draft.toeRating };
+		await this.app.vault.modify(file, buildControlNoteContent(updated));
 	}
 }
