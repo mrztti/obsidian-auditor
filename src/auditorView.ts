@@ -170,6 +170,8 @@ export class AuditorView extends ItemView {
 	private pipelineState: PipelineState = emptyPipelineState('', '');
 	private searchStoreKind: StoreKind = 'evidence';
 	private unsubscribeThroughput: (() => void) | null = null;
+	/** When on, each pipeline step advances to the next automatically (using default selections) instead of waiting for the user to click "Continue" — up to the final draft step. */
+	private autoMode = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: AuditorPlugin) {
 		super(leaf);
@@ -500,6 +502,14 @@ export class AuditorView extends ItemView {
 	/** Step 1: free-text control/requirement input. */
 	private renderPipelineStart(): void {
 		this.pipelineEl.empty();
+
+		const autoModeRow = this.pipelineEl.createDiv('auditor-automode-row');
+		const autoModeLabel = autoModeRow.createEl('label', { cls: 'auditor-search-store-option' });
+		const autoModeToggle = autoModeLabel.createEl('input', { type: 'checkbox' });
+		autoModeToggle.checked = this.autoMode;
+		autoModeToggle.addEventListener('change', () => { this.autoMode = autoModeToggle.checked; });
+		autoModeLabel.createSpan({ text: 'Auto-mode (automatically continue through each step, using default selections, until the draft is ready)' });
+
 		this.pipelineHistoryEl = this.pipelineEl.createEl('details', { cls: 'auditor-thinking' });
 		this.pipelineHistoryEl.createEl('summary', { text: 'Pipeline history' });
 		this.renderStepsLog();
@@ -530,6 +540,33 @@ export class AuditorView extends ItemView {
 
 	private showStatus(parent: HTMLElement, msg: string): HTMLElement {
 		return parent.createEl('p', { text: msg, cls: 'auditor-status' });
+	}
+
+	/** Scrolls a newly-rendered step into view (bottom-aligned) so its "Continue" button is always visible once results land — in both manual and auto mode. */
+	private scrollStepIntoView(step: HTMLElement): void {
+		step.scrollIntoView({ behavior: 'smooth', block: 'end' });
+	}
+
+	/** Beeps once, using the Web Audio API (no bundled asset needed) — signals that auto-mode reached the final draft step. */
+	private playNotificationSound(): void {
+		try {
+			const AudioCtx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+			if (!AudioCtx) return;
+			const ctx = new AudioCtx();
+			const oscillator = ctx.createOscillator();
+			const gain = ctx.createGain();
+			oscillator.connect(gain);
+			gain.connect(ctx.destination);
+			oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+			oscillator.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.15);
+			gain.gain.setValueAtTime(0.15, ctx.currentTime);
+			gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+			oscillator.start();
+			oscillator.stop(ctx.currentTime + 0.4);
+			window.setTimeout(() => { void ctx.close(); }, 500);
+		} catch (e) {
+			console.error('[Auditor] failed to play notification sound', e);
+		}
 	}
 
 	/** Appends a step to the running pipeline state log and refreshes its display. */
@@ -580,6 +617,7 @@ export class AuditorView extends ItemView {
 			this.logStep('Searched standards and analyzed the control');
 			status.remove();
 			this.renderControlUnderstandingStep(step);
+			this.scrollStepIntoView(step);
 		} catch (e) {
 			status.setText(`Analysis failed: ${String(e)}`);
 		}
@@ -644,6 +682,8 @@ export class AuditorView extends ItemView {
 
 		const searchBtn = step.createEl('button', { text: 'Search for documents', cls: 'mod-cta' });
 		searchBtn.addEventListener('click', () => { void this.runDocumentsResearch(searchBtn); });
+
+		if (this.autoMode) void this.runDocumentsResearch(searchBtn);
 	}
 
 	/**
@@ -680,6 +720,7 @@ export class AuditorView extends ItemView {
 			this.logStep(`Searched evidence for ${targets.length} document(s) and assessed progress`);
 			status.remove();
 			this.renderResearchStep(body);
+			this.scrollStepIntoView(step);
 		} catch (e) {
 			status.setText(`Research failed: ${String(e)}`);
 		} finally {
@@ -756,6 +797,8 @@ export class AuditorView extends ItemView {
 
 		const nextBtn = actionsRow.createEl('button', { text: 'Continue with search for existing controls', cls: 'mod-cta' });
 		nextBtn.addEventListener('click', () => { void this.runSimilarControlsSearch(); });
+
+		if (this.autoMode) void this.runSimilarControlsSearch();
 	}
 
 	/** Step 4: RAG over Written controls, user selects which to use as style reference. */
@@ -773,6 +816,7 @@ export class AuditorView extends ItemView {
 			this.logStep('Searched for existing written controls');
 			status.remove();
 			this.renderSimilarControlsStep(step);
+			this.scrollStepIntoView(step);
 		} catch (e) {
 			status.setText(`Search failed: ${String(e)}`);
 		}
@@ -783,6 +827,8 @@ export class AuditorView extends ItemView {
 
 		const nextBtn = step.createEl('button', { text: 'Continue to finalizing', cls: 'mod-cta' });
 		nextBtn.addEventListener('click', () => { void this.runFinalizationPlan(nextBtn); });
+
+		if (this.autoMode) void this.runFinalizationPlan(nextBtn);
 	}
 
 	/**
@@ -809,6 +855,7 @@ export class AuditorView extends ItemView {
 			);
 			status.remove();
 			this.renderFinalizationStep(step);
+			this.scrollStepIntoView(step);
 		} catch (e) {
 			status.setText(`Finalization planning failed: ${String(e)}`);
 		} finally {
@@ -914,6 +961,8 @@ export class AuditorView extends ItemView {
 
 		const nextBtn = step.createEl('button', { text: 'Draft control', cls: 'mod-cta' });
 		nextBtn.addEventListener('click', () => { void this.runDraft(); });
+
+		if (this.autoMode) void this.runDraft();
 	}
 
 	/** Step 6: Gemini drafts the final control from the curated, finalization-checklist-filtered context; result can be saved as a new note. */
@@ -959,6 +1008,8 @@ export class AuditorView extends ItemView {
 			status.remove();
 			this.renderThinking(step, drafted.thinking);
 			this.renderDraftStep(step);
+			this.scrollStepIntoView(step);
+			if (this.autoMode) this.playNotificationSound();
 		} catch (e) {
 			status.setText(`Draft failed: ${String(e)}`);
 		}

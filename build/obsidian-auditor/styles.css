@@ -207,6 +207,14 @@ a.auditor-search-file-item {
 	align-items: center;
 }
 
+.auditor-automode-row {
+	display: flex;
+	align-items: center;
+	padding-bottom: 8px;
+	margin-bottom: 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
 .auditor-throughput-graph {
 	display: flex;
 	flex-direction: column;
