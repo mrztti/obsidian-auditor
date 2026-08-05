@@ -1,8 +1,4 @@
 import { GoogleGenAI, Type, type Schema } from '@google/genai';
-import { CONTROL_FIELD_KEYS, type ControlFieldKey } from './controlNote';
-
-/** Cheap model used for the Excel import feature's column-mapping step — never the user's configured generation model, to keep imports cost-efficient. */
-export const IMPORT_MODEL = 'gemini-3.1-flash-lite';
 
 export interface RerankedSnippet {
 	index: number;
@@ -277,6 +273,108 @@ const DRAFT_STAGE2_SCHEMA: Schema = {
 		},
 	},
 	required: ['toeConclusion', 'toeRating'],
+};
+
+export interface EvidenceGoalDecision {
+	action: 'create' | 'link' | 'modify_and_link';
+	/** Existing EG's ID, for "link"/"modify_and_link". Empty for "create". */
+	targetId: string;
+	/** New/replacement fields, for "create"/"modify_and_link". Empty/unused for "link". */
+	name: string;
+	description: string;
+	questions: string[];
+	type: 'screenshot' | 'file';
+}
+
+export interface EvidenceGoalPlan {
+	thinking: string;
+	/** One control can need more than one screenshot/file — most controls need exactly one decision, but a control covering several distinct pieces of evidence (e.g. two different config screens) gets one decision per piece. */
+	decisions: EvidenceGoalDecision[];
+}
+
+const EVIDENCE_GOAL_DECISION_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		action: {
+			type: Type.STRING,
+			enum: ['create', 'link', 'modify_and_link'],
+			description: '"link" if an existing EG already covers this piece of evidence as-is; "modify_and_link" if one is a close-enough fit once broadened; "create" if none are a reasonable fit.',
+		},
+		targetId: {
+			type: Type.STRING,
+			description: 'The existing EG\'s ID, for "link"/"modify_and_link". Empty string for "create".',
+		},
+		name: {
+			type: Type.STRING,
+			description: 'The (new, or replacement) EG name. Empty string for "link".',
+		},
+		description: {
+			type: Type.STRING,
+			description: 'What exactly should be captured and why it matters, covering every control this EG applies to. Empty string for "link".',
+		},
+		questions: {
+			type: Type.ARRAY,
+			items: { type: Type.STRING },
+			description: 'Questions the auditor should ask the interviewee to prompt them into showing/navigating to the evidence. Empty array for "link".',
+		},
+		type: {
+			type: Type.STRING,
+			enum: ['screenshot', 'file'],
+			description: 'Almost always "screenshot"; "file" only when a screenshot genuinely cannot capture the evidence. Empty/ignored for "link".',
+		},
+	},
+	required: ['action', 'targetId', 'name', 'description', 'questions', 'type'],
+};
+
+const EVIDENCE_GOAL_PLAN_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		decisions: {
+			type: Type.ARRAY,
+			description: 'One decision per distinct piece of evidence this control needs. Most controls need exactly one; only add more when the control genuinely requires separate, distinct screenshots/files to be verified.',
+			items: EVIDENCE_GOAL_DECISION_SCHEMA,
+		},
+	},
+	required: ['decisions'],
+};
+
+export interface EvidenceGoalCompressionMerge {
+	sourceIds: string[];
+	name: string;
+	description: string;
+	questions: string[];
+	type: 'screenshot' | 'file';
+}
+
+export interface EvidenceGoalCompressionPlan {
+	thinking: string;
+	merges: EvidenceGoalCompressionMerge[];
+}
+
+const EVIDENCE_GOAL_COMPRESSION_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		merges: {
+			type: Type.ARRAY,
+			description: 'Groups of 2+ evidence-goal IDs that should be merged into one. Omit EGs that should stay as-is.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					sourceIds: {
+						type: Type.ARRAY,
+						items: { type: Type.STRING },
+						description: 'IDs of the evidence goals being merged (2 or more).',
+					},
+					name: { type: Type.STRING, description: 'The merged EG\'s name.' },
+					description: { type: Type.STRING, description: 'The merged EG\'s description, correctly covering every control all merged EGs covered.' },
+					questions: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'The merged EG\'s questions.' },
+					type: { type: Type.STRING, enum: ['screenshot', 'file'], description: 'The merged EG\'s type.' },
+				},
+				required: ['sourceIds', 'name', 'description', 'questions', 'type'],
+			},
+		},
+	},
+	required: ['merges'],
 };
 
 const RERANK_SCHEMA: Schema = {
@@ -712,84 +810,6 @@ export class GeminiGenerate {
 	}
 
 	/**
-	 * Import step 1: given the workbook's headers and a handful of sample rows (never the whole
-	 * file), asks the cheap import model to propose which column maps to which control field.
-	 * The user reviews/corrects this mapping before any bulk extraction happens.
-	 */
-	async mapExcelColumns(
-		headers: string[],
-		sampleRows: string[][],
-		instructions: string,
-	): Promise<{
-		thinking: string;
-		mapping: Partial<Record<ControlFieldKey, string>>;
-		notes: string;
-	}> {
-		const sampleBlock = sampleRows
-			.map(
-				(row, i) =>
-					`Row ${i + 1}: ${headers.map((h, ci) => `${h}=${row[ci] ?? ''}`).join(' | ')}`,
-			)
-			.join('\n');
-		const prompt = [
-			'You are helping an auditor import controls from a spreadsheet into a structured format.',
-			"Given the spreadsheet's column headers and a few sample rows, decide which column (by exact",
-			'header text) corresponds to each target field. A column may be left unmapped (empty string)',
-			'if nothing in the sheet corresponds to it. Do not guess wildly — only map a column when it',
-			"plausibly contains that field's data.",
-			'',
-			'Target fields:',
-			CONTROL_FIELD_KEYS.map((k) => `- ${k}`).join('\n'),
-			'',
-			...(instructions
-				? ["Auditor's additional instructions:", instructions, '']
-				: []),
-			'Column headers:',
-			headers.join(' | '),
-			'',
-			'Sample rows:',
-			sampleBlock,
-		].join('\n');
-
-		const properties = Object.fromEntries(
-			CONTROL_FIELD_KEYS.map((k) => [
-				k,
-				{
-					type: Type.STRING,
-					description: `Exact column header that maps to "${k}", or empty string if no column corresponds to it.`,
-				},
-			]),
-		);
-		const schema: Schema = {
-			type: Type.OBJECT,
-			properties: {
-				mapping: {
-					type: Type.OBJECT,
-					properties,
-					required: [...CONTROL_FIELD_KEYS],
-				},
-				notes: {
-					type: Type.STRING,
-					description:
-						'Notes on ambiguities or fields that could not be mapped.',
-				},
-			},
-			required: ['mapping', 'notes'],
-		};
-
-		const { thinking, parsed } = await this.generateStructured<{
-			mapping: Record<string, string>;
-			notes: string;
-		}>(prompt, schema, IMPORT_MODEL, true);
-		const mapping: Partial<Record<ControlFieldKey, string>> = {};
-		for (const key of CONTROL_FIELD_KEYS) {
-			const value = parsed.mapping[key];
-			if (value) mapping[key] = value;
-		}
-		return { thinking, mapping, notes: parsed.notes };
-	}
-
-	/**
 	 * Step 1 of the chat flow: given the conversation so far and the auditor's latest message,
 	 * decides whether searching the vault would help at all, and if so, what kind of documents to
 	 * look for — expressed as a keyword-dense query suited to embedding retrieval, not just the raw
@@ -866,5 +886,126 @@ export class GeminiGenerate {
 			'Assistant:',
 		].join('\n');
 		return this.generate(prompt);
+	}
+
+	/**
+	 * "Prepare session" step 1: given a control's full context and the Evidence Goals (EGs) already
+	 * in its session that looked plausibly relevant (via RAG), decides whether to create a brand new
+	 * EG, link this control to an existing one as-is, or modify an existing one (broadening its name/
+	 * description/questions to also fit this control) and link it. The goal is to minimize the total
+	 * number of EGs a session needs — reuse/modify an existing EG whenever it's a reasonable fit
+	 * rather than creating a near-duplicate.
+	 */
+	async planEvidenceGoal(
+		controlContext: string,
+		standardsContext: string,
+		setupContext: string,
+		evidenceContext: string,
+		candidateEvidenceGoals: { id: string; name: string; description: string; questions: string[]; type: string; controlNumbers: string[] }[],
+	): Promise<EvidenceGoalPlan> {
+		const candidatesBlock = candidateEvidenceGoals.length > 0
+			? candidateEvidenceGoals
+				.map((eg) => [
+					`[${eg.id}] ${eg.name} (${eg.type})`,
+					`Currently used by: ${eg.controlNumbers.join(', ') || '(none)'}`,
+					`Description: ${eg.description}`,
+					eg.questions.length > 0 ? `Questions: ${eg.questions.join(' | ')}` : '',
+				].filter(Boolean).join('\n'))
+				.join('\n\n')
+			: '(no existing evidence goals found in this session yet)';
+
+		const prompt = [
+			'You are planning an audit interview session. An "Evidence Goal" (EG) is a single screenshot',
+			'(or, rarely, file) an auditor needs to capture during the interview to verify a control is',
+			'conform in practice. The SAME EG can — and should, whenever reasonable — serve MULTIPLE',
+			'controls at once. The objective is to plan the session with as FEW evidence goals as',
+			'possible, so before creating a new one, always check whether an existing one already covers',
+			'this control, or could reasonably be broadened (a slightly more general name/description/',
+			'question set) to cover it too, without becoming vague or losing what it actually verifies.',
+			'',
+			'Most controls need exactly one evidence goal. Only produce more than one decision when the',
+			'control genuinely requires multiple distinct, separately-captured pieces of evidence (e.g. two',
+			'different configuration screens) — do not split a single piece of evidence into several',
+			'decisions just because the control text has several sentences.',
+			'',
+			'For each decision, choose exactly one action:',
+			'- "link": an existing EG below already fully covers this piece of evidence as-is. Just',
+			'  attach this control to it — do not change its name/description/questions.',
+			'- "modify_and_link": an existing EG below is a close but not perfect fit. Broaden its name/',
+			'  description/questions just enough to also cover this control, then attach this control to',
+			'  it. The new fields REPLACE the EG\'s current ones — write them so they still make complete',
+			'  sense for every control the EG already covers, not just this one.',
+			'- "create": no existing EG is a reasonable fit. Define a new one.',
+			'',
+			'For "link", set targetId to the existing EG\'s ID and leave name/description/questions empty.',
+			'For "modify_and_link", set targetId to the existing EG\'s ID and fill in the replacement',
+			'name/description/questions/type. For "create", leave targetId empty and fill in the new',
+			'EG\'s name/description/questions/type.',
+			'',
+			'An EG\'s description should say exactly what should be captured and why it matters. Questions',
+			'are what the auditor should ask the interviewee to prompt them into showing/navigating to it.',
+			'Use the client\'s actual setup (below) and any existing evidence to ground the description and',
+			'questions in what is realistically there to find, rather than generic wording.',
+			'',
+			'Control (full context — standard, topic, control text, and any existing Stage 1/Stage 2',
+			'conclusions):',
+			controlContext,
+			'',
+			'Relevant supporting standards (context only):',
+			standardsContext || '(none)',
+			'',
+			'The client\'s actual setup, to the best of our knowledge (ground truth for what evidence',
+			'realistically exists and where — use this to make descriptions/questions concrete):',
+			setupContext || '(no setup description provided)',
+			'',
+			'Relevant evidence already collected for this control (use to ground the EG in what has',
+			'actually been observed so far, not to replace the evidence goal itself):',
+			evidenceContext || '(none found)',
+			'',
+			'Existing evidence goals already in this session:',
+			candidatesBlock,
+		].join('\n');
+
+		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_PLAN_SCHEMA);
+		return { thinking, ...parsed };
+	}
+
+	/**
+	 * "Prepare session" step 4: given every EG a session ended up with, looks for further compression
+	 * opportunities the incremental per-control planning above may have missed (e.g. two EGs created
+	 * early on, before either had seen the other, that turn out to overlap). Returns groups of 2+ EG
+	 * IDs to merge into one, with the merged EG's fields — never invents merges among EGs that don't
+	 * actually overlap.
+	 */
+	async compressEvidenceGoals(
+		evidenceGoals: { id: string; name: string; description: string; questions: string[]; type: string; controlNumbers: string[] }[],
+	): Promise<EvidenceGoalCompressionPlan> {
+		const block = evidenceGoals
+			.map((eg) => [
+				`[${eg.id}] ${eg.name} (${eg.type})`,
+				`Controls: ${eg.controlNumbers.join(', ')}`,
+				`Description: ${eg.description}`,
+				eg.questions.length > 0 ? `Questions: ${eg.questions.join(' | ')}` : '',
+			].filter(Boolean).join('\n'))
+			.join('\n\n');
+
+		const prompt = [
+			'You are reviewing a finished list of Evidence Goals (EGs) planned for one audit interview',
+			'session, looking for further compression: pairs or groups of EGs that actually verify the',
+			'same screenshot/file, or are close enough that broadening one slightly would let it absorb',
+			'the other(s) without losing precision. Only propose a merge when it genuinely reduces',
+			'redundant screenshots the auditor would otherwise capture twice — do not merge EGs that',
+			'cover meaningfully different evidence just because they sound similar.',
+			'',
+			'For each merge, list the EG IDs being merged (2 or more) and write the single replacement',
+			'EG (name/description/questions/type) that correctly covers every control all of the merged',
+			'EGs covered. EGs not mentioned in any merge are left as-is.',
+			'',
+			'Evidence goals in this session:',
+			block,
+		].join('\n');
+
+		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalCompressionPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_COMPRESSION_SCHEMA);
+		return { thinking, ...parsed };
 	}
 }

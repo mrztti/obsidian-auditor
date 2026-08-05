@@ -26,13 +26,23 @@ function cellToString(value: unknown): string {
 	return `[${Object.prototype.toString.call(value)}]`;
 }
 
-async function loadFirstWorksheet(vault: Vault, file: TFile): Promise<ExcelJS.Worksheet> {
+async function loadWorkbook(vault: Vault, file: TFile): Promise<ExcelJS.Workbook> {
 	const buffer = await vault.readBinary(file);
 	const workbook = new ExcelJS.Workbook();
 	await workbook.xlsx.load(buffer);
-	const sheet = workbook.worksheets[0];
-	if (!sheet) throw new Error('Workbook has no worksheets.');
+	return workbook;
+}
+
+function getSheet(workbook: ExcelJS.Workbook, sheetName?: string): ExcelJS.Worksheet {
+	const sheet = sheetName ? workbook.getWorksheet(sheetName) : workbook.worksheets[0];
+	if (!sheet) throw new Error(sheetName ? `Sheet "${sheetName}" not found.` : 'Workbook has no worksheets.');
 	return sheet;
+}
+
+/** Lists sheet names in workbook order, for the user to pick which one to import from. */
+export async function readWorkbookSheetNames(vault: Vault, file: TFile): Promise<string[]> {
+	const workbook = await loadWorkbook(vault, file);
+	return workbook.worksheets.map((s) => s.name);
 }
 
 interface TabularData {
@@ -125,15 +135,15 @@ function extractTabularData(sheet: ExcelJS.Worksheet): TabularData {
 	return extractFromDefinedTable(sheet) ?? extractFromRange(sheet);
 }
 
-/** Reads only the header row and up to MAX_PREVIEW_ROWS data rows — used to build the LLM column mapping without shipping the whole file. */
-export async function readWorkbookPreview(vault: Vault, file: TFile): Promise<WorkbookPreview> {
-	const sheet = await loadFirstWorksheet(vault, file);
-	const { headers, rows } = extractTabularData(sheet);
+/** Reads only the header row and up to MAX_PREVIEW_ROWS data rows of the given sheet — shown to the user while they manually map columns. */
+export async function readWorkbookPreview(vault: Vault, file: TFile, sheetName?: string): Promise<WorkbookPreview> {
+	const workbook = await loadWorkbook(vault, file);
+	const { headers, rows } = extractTabularData(getSheet(workbook, sheetName));
 	return { headers, rowCount: rows.length, sampleRows: rows.slice(0, MAX_PREVIEW_ROWS) };
 }
 
-/** Reads every data row (excluding the header), as arrays aligned to the headers returned by `readWorkbookPreview` for the same file. */
-export async function readWorkbookRows(vault: Vault, file: TFile): Promise<string[][]> {
-	const sheet = await loadFirstWorksheet(vault, file);
-	return extractTabularData(sheet).rows;
+/** Reads every data row (excluding the header) of the given sheet, as arrays aligned to the headers returned by `readWorkbookPreview` for the same file/sheet. */
+export async function readWorkbookRows(vault: Vault, file: TFile, sheetName?: string): Promise<string[][]> {
+	const workbook = await loadWorkbook(vault, file);
+	return extractTabularData(getSheet(workbook, sheetName)).rows;
 }

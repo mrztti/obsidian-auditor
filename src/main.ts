@@ -1,17 +1,27 @@
-import { FileSystemAdapter, Notice, Plugin, normalizePath } from 'obsidian';
+import { FileSystemAdapter, Notice, Plugin, TFile, normalizePath } from 'obsidian';
 import {
 	AuditorSettings,
 	DEFAULT_SETTINGS,
 	AuditorSettingTab,
 } from './settings';
 import { AuditVectorStore, type IndexSummary } from './vectorStore';
+import { EvidenceGoalIndex } from './evidenceGoalIndex';
 import { GeminiEmbeddings } from './geminiEmbeddings';
 import { GeminiGenerate } from './geminiGenerate';
 import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
+import { ControlsView, CONTROLS_VIEW_TYPE } from './controlsView';
+import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
 import { FileExplorerDecorator } from './fileExplorerDecorator';
 import { AddControlModal } from './addControlModal';
 import { RateLimiter } from './rateLimiter';
 import { buildControlNoteContent, sanitizeFileTitle, type ControlRecord } from './controlNote';
+import {
+	buildSessionPlanContent,
+	emptySessionPlan,
+	parseSessionPlanContent,
+	sanitizeSessionFileName,
+	type InterviewSessionPlan,
+} from './evidenceGoal';
 
 const log = (...args: unknown[]) => console.debug('[Auditor]', ...args);
 
@@ -23,6 +33,7 @@ export default class AuditorPlugin extends Plugin {
 	evidenceIndex!: AuditVectorStore;
 	writtenControlsIndex!: AuditVectorStore;
 	interviewEvidenceIndex!: AuditVectorStore;
+	evidenceGoalIndex!: EvidenceGoalIndex;
 	geminiGenerate!: GeminiGenerate;
 	fileExplorerDecorator!: FileExplorerDecorator;
 	rateLimiter!: RateLimiter;
@@ -70,6 +81,10 @@ export default class AuditorPlugin extends Plugin {
 			this.settings.chunkWords,
 			this.settings.maxConcurrentIndexing,
 		);
+		this.evidenceGoalIndex = new EvidenceGoalIndex(
+			embeddings,
+			`${dataRoot}/vector-index/evidence-goals`,
+		);
 
 		this.fileExplorerDecorator = new FileExplorerDecorator(this);
 		this.app.workspace.onLayoutReady(() => {
@@ -100,9 +115,21 @@ export default class AuditorPlugin extends Plugin {
 			AUDITOR_VIEW_TYPE,
 			(leaf) => new AuditorView(leaf, this),
 		);
+		this.registerView(
+			CONTROLS_VIEW_TYPE,
+			(leaf) => new ControlsView(leaf, this),
+		);
+		this.registerView(
+			CONTROL_DETAIL_VIEW_TYPE,
+			(leaf) => new ControlDetailView(leaf, this),
+		);
 
 		this.addRibbonIcon('bot', 'Open auditor', () => {
 			void this.activateAuditorView();
+		});
+
+		this.addRibbonIcon('list-checks', 'Open controls', () => {
+			void this.activateControlsView();
 		});
 
 		this.addRibbonIcon('file-plus', 'Add control', () => {
@@ -116,6 +143,14 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Open main view',
 			callback: () => {
 				void this.activateAuditorView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-controls',
+			name: 'Open controls',
+			callback: () => {
+				void this.activateControlsView();
 			},
 		});
 
@@ -158,6 +193,14 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Re-index interview evidence',
 			callback: () => {
 				void this.runIndexing('interviewEvidence');
+			},
+		});
+
+		this.addCommand({
+			id: 'reindex-evidence-goals',
+			name: 'Re-index evidence goals',
+			callback: () => {
+				void this.reindexEvidenceGoals();
 			},
 		});
 
@@ -281,6 +324,39 @@ export default class AuditorPlugin extends Plugin {
 		void this.app.workspace.revealLeaf(leaf);
 	}
 
+	async activateControlsView(): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(CONTROLS_VIEW_TYPE);
+		const existing = leaves[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getLeaf('tab');
+		await leaf.setViewState({ type: CONTROLS_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Opens (or reuses) the control-detail view in the right sidebar and points it at the given control. */
+	async openControlDetail(file: TFile, record: ControlRecord): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(CONTROL_DETAIL_VIEW_TYPE);
+		let leaf = leaves[0];
+		if (!leaf) {
+			const rightLeaf = this.app.workspace.getRightLeaf(false);
+			if (!rightLeaf) return;
+			leaf = rightLeaf;
+			await leaf.setViewState({ type: CONTROL_DETAIL_VIEW_TYPE, active: true });
+		}
+		void this.app.workspace.revealLeaf(leaf);
+		if (leaf.view instanceof ControlDetailView) await leaf.view.setControl(file, record);
+	}
+
+	/** Reloads every open Controls view (there's normally at most one) — called after a save from the control-detail view, since that save doesn't go through the Controls view's own UI. */
+	refreshControlsViews(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(CONTROLS_VIEW_TYPE)) {
+			if (leaf.view instanceof ControlsView) void leaf.view.refresh();
+		}
+	}
+
 	/**
 	 * Creates a new note in the written-controls folder, in the canonical control-record format,
 	 * then re-indexes that folder so the new control is immediately searchable. The note's filename
@@ -299,24 +375,49 @@ export default class AuditorPlugin extends Plugin {
 	}
 
 	/**
+	 * The path a control record's note would be written to, based on its number — same naming
+	 * scheme `saveControlNote`/`importControlRecords` use. Exposed so the import flow can compute
+	 * collisions with existing notes before writing anything.
+	 */
+	controlNotePath(record: ControlRecord): string {
+		const folder = this.settings.writtenControlsFolder;
+		const safeNumber = sanitizeFileTitle(record.number || 'Untitled control');
+		return normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
+	}
+
+	/**
 	 * Writes many control records in one go (used by the Excel import feature): unlike
 	 * `saveControlNote`, this does not open each note and only re-indexes the written-controls
-	 * folder once at the end. Filenames that collide with an existing note get a numeric suffix.
+	 * folder once at the end. When `overwrite` is false, filenames that collide with an existing
+	 * note get a numeric suffix instead of being touched; when true, the existing note's content is
+	 * replaced. Callers should confirm with the user (via `controlNotePath`) before passing `overwrite`.
 	 */
-	async importControlRecords(records: ControlRecord[]): Promise<{ written: number; failed: { record: ControlRecord; error: string }[] }> {
+	async importControlRecords(records: ControlRecord[], overwrite = false): Promise<{ written: number; failed: { record: ControlRecord; error: string }[] }> {
 		const folder = this.settings.writtenControlsFolder;
 		const failed: { record: ControlRecord; error: string }[] = [];
 		let written = 0;
 		for (const record of records) {
 			try {
-				const base = sanitizeFileTitle(record.number || 'Untitled control');
-				let safeNumber = base;
-				let suffix = 1;
-				while (this.app.vault.getAbstractFileByPath(normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`))) {
-					safeNumber = `${base}-${++suffix}`;
+				const content = buildControlNoteContent(record);
+				const directPath = this.controlNotePath(record);
+				const existing = this.app.vault.getAbstractFileByPath(directPath);
+				if (existing instanceof TFile) {
+					if (!overwrite) {
+						const base = sanitizeFileTitle(record.number || 'Untitled control');
+						let safeNumber = base;
+						let suffix = 1;
+						let path = directPath;
+						while (this.app.vault.getAbstractFileByPath(path)) {
+							safeNumber = `${base}-${++suffix}`;
+							path = normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
+						}
+						await this.app.vault.create(path, content);
+					} else {
+						await this.app.vault.modify(existing, content);
+					}
+				} else {
+					await this.app.vault.create(directPath, content);
 				}
-				const path = normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
-				await this.app.vault.create(path, buildControlNoteContent(record));
 				written++;
 			} catch (e) {
 				failed.push({ record, error: String(e) });
@@ -324,6 +425,52 @@ export default class AuditorPlugin extends Plugin {
 		}
 		if (written > 0) void this.runIndexing('writtenControls');
 		return { written, failed };
+	}
+
+	/** The path a session's interview session plan note lives at — one note per session, named after it. */
+	sessionPlanPath(session: string): string {
+		const folder = this.settings.interviewSessionPlansFolder;
+		const safeName = sanitizeSessionFileName(session);
+		return normalizePath(folder ? `${folder}/${safeName}.md` : `${safeName}.md`);
+	}
+
+	/** Loads the session plan (its Evidence Goals) for a given session, or an empty one if no plan note exists yet. */
+	async loadSessionPlan(session: string): Promise<InterviewSessionPlan> {
+		const path = this.sessionPlanPath(session);
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return emptySessionPlan(session);
+		const content = await this.app.vault.read(file);
+		return parseSessionPlanContent(content, session);
+	}
+
+	/** Writes a session plan back to its note, creating the note (and its folder) if it doesn't exist yet. */
+	async saveSessionPlan(plan: InterviewSessionPlan): Promise<void> {
+		const path = this.sessionPlanPath(plan.session);
+		const content = buildSessionPlanContent(plan);
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing instanceof TFile) {
+			await this.app.vault.modify(existing, content);
+			return;
+		}
+		const folder = this.settings.interviewSessionPlansFolder;
+		if (folder && !this.app.vault.getAbstractFileByPath(normalizePath(folder))) {
+			await this.app.vault.createFolder(normalizePath(folder));
+		}
+		await this.app.vault.create(path, content);
+	}
+
+	/** Full re-sync of the evidence-goal index against every session plan note currently in the vault. */
+	async reindexEvidenceGoals(): Promise<void> {
+		const notice = new Notice('Auditor: indexing evidence goals…', 0);
+		try {
+			await this.evidenceGoalIndex.rebuildAll(this.app.vault, this.settings.interviewSessionPlansFolder);
+			notice.setMessage('Auditor: evidence goals indexed.');
+			window.setTimeout(() => notice.hide(), 3000);
+		} catch (e) {
+			notice.hide();
+			console.error('[Auditor] reindexEvidenceGoals failed', e);
+			new Notice(`Auditor: evidence-goal indexing failed — ${String(e)}`);
+		}
 	}
 
 	async loadSettings() {

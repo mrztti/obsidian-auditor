@@ -14,6 +14,8 @@ export interface AuditorSettings {
 	writtenControlsFolder: string;
 	/** Vault folder containing interview evidence (Test of Effectiveness / Stage 2 evidence). */
 	interviewEvidenceFolder: string;
+	/** Vault folder where interview session plans (one note per session, listing its Evidence Goals) are stored. */
+	interviewSessionPlansFolder: string;
 	maxResults: number;
 	/** Target paragraph-chunk size in words. */
 	chunkWords: number;
@@ -119,6 +121,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	evidenceFolder: '',
 	writtenControlsFolder: '',
 	interviewEvidenceFolder: '',
+	interviewSessionPlansFolder: '',
 	maxResults: 10,
 	chunkWords: 300,
 	defaultWritingRules: DEFAULT_WRITING_RULES,
@@ -236,6 +239,20 @@ export class AuditorSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.interviewEvidenceFolder)
 					.onChange(async (value) => {
 						this.plugin.settings.interviewEvidenceFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Interview session plans folder')
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Evidence Goals" names the plugin's own concept
+			.setDesc('Vault folder where interview session plans are stored — one note per session, listing its Evidence Goals.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Interview session plans')
+					.setValue(this.plugin.settings.interviewSessionPlansFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.interviewSessionPlansFolder = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);

@@ -1,14 +1,15 @@
 import { App, Modal, TFile } from 'obsidian';
 import type AuditorPlugin from './main';
-import { readWorkbookPreview, readWorkbookRows } from './controlImport';
-import { CONTROL_FIELD_KEYS, emptyControlRecord, type ControlFieldKey, type ControlRating, type ControlRecord } from './controlNote';
+import { readWorkbookPreview, readWorkbookRows, readWorkbookSheetNames } from './controlImport';
+import { CONTROL_FIELD_KEYS, emptyControlRecord, todayIsoDate, type ControlFieldKey, type ControlRating, type ControlRecord } from './controlNote';
 
-/** Turns free-text rating cells (e.g. "Non-conformant", "Conform w/ observation") into the canonical rating code, without needing an LLM call. */
+/** Turns free-text rating cells (e.g. "Non-conformant", "Conform w/ observation") into the canonical rating code. */
 function normalizeRating(raw: string): ControlRating {
 	const v = raw.trim();
-	if (v === 'C' || v === 'C*' || v === 'NC') return v;
+	if (v === 'C' || v === 'C*' || v === 'NC' || v === '-') return v;
 	const lower = v.toLowerCase();
 	if (!lower) return '';
+	if (lower === 'n/a' || lower === 'na' || lower === 'not applicable') return '-';
 	if (lower.includes('non') && lower.includes('conform')) return 'NC';
 	if (lower.includes('conform') && (lower.includes('*') || lower.includes('observ') || lower.includes('minor'))) return 'C*';
 	if (lower.includes('conform')) return 'C';
@@ -27,22 +28,28 @@ const FIELD_LABELS: Record<ControlFieldKey, string> = {
 	todRating: 'ToD rating',
 	toeConclusion: 'ToE conclusion',
 	toeRating: 'ToE rating',
-	comments: 'Comments',
 };
 
-type Stage = 'setup' | 'mapping' | 'importing' | 'done';
+type Stage = 'setup' | 'mapping' | 'confirm' | 'importing' | 'done';
 
-/** Modal driving the Excel import flow: pick a workbook → LLM proposes a column mapping (reviewable) → once the mapping is confirmed, rows are copied directly into control notes (no further LLM calls needed). */
+/** Modal driving the fully manual Excel import flow: pick a workbook and sheet, review a sample of its rows, assign a column to each control field, then rows are copied directly into control notes. No LLM involved. */
 export class ImportControlsModal extends Modal {
 	private plugin: AuditorPlugin;
 	private onComplete: () => void;
 	private stage: Stage = 'setup';
 	private selectedFile: TFile | null = null;
-	private instructions = '';
+	private sheetNames: string[] = [];
+	private selectedSheet = '';
 	private mapping: Partial<Record<ControlFieldKey, string>> = {};
-	private mappingNotes = '';
+	/** Column whose value gates whether a row is imported at all — rows where this column is empty are skipped. Left unset, every row is imported. */
+	private gateColumn = '';
+	/** Optional column whose value becomes the control's first comment, dated with today's date. */
+	private commentColumn = '';
 	private headers: string[] = [];
+	private sampleRows: string[][] = [];
 	private cancelled = false;
+	private pendingRecords: ControlRecord[] = [];
+	private overwritePaths: string[] = [];
 
 	constructor(app: App, plugin: AuditorPlugin, onComplete: () => void) {
 		super(app);
@@ -66,62 +73,95 @@ export class ImportControlsModal extends Modal {
 		contentEl.empty();
 		if (this.stage === 'setup') this.renderSetup(contentEl);
 		else if (this.stage === 'mapping') this.renderMapping(contentEl);
+		else if (this.stage === 'confirm') this.renderConfirm(contentEl);
 		else this.renderProgress(contentEl);
 	}
 
-	// ─── Stage 1: pick file + instructions ─────────────────────────────────
+	// ─── Stage 1: pick file + sheet ────────────────────────────────────────
 
 	private renderSetup(container: HTMLElement): void {
 		const files = this.app.vault.getFiles().filter((f) => f.extension === 'xlsx' || f.extension === 'xls');
 
 		container.createDiv('auditor-field').createEl('label', { text: 'Spreadsheet', cls: 'auditor-field-label' });
-		const select = container.createEl('select');
-		select.createEl('option', { text: '— choose a file —', value: '' });
-		for (const file of files) select.createEl('option', { text: file.path, value: file.path });
-		select.addEventListener('change', () => {
-			this.selectedFile = files.find((f) => f.path === select.value) ?? null;
-		});
+		const fileSelect = container.createEl('select');
+		fileSelect.createEl('option', { text: '— choose a file —', value: '' });
+		for (const file of files) fileSelect.createEl('option', { text: file.path, value: file.path });
 		if (files.length === 0) {
 			container.createEl('p', { text: 'No .xlsx/.xls files found in the vault.', cls: 'auditor-status' });
 		}
 
-		const instrField = container.createDiv('auditor-field');
-		instrField.createEl('label', { text: 'Additional instructions for column mapping', cls: 'auditor-field-label' });
-		const textarea = instrField.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
-		textarea.rows = 5;
-		textarea.placeholder = 'Anything the model should know about this sheet\'s columns or conventions…';
-		textarea.addEventListener('input', () => { this.instructions = textarea.value; });
+		const sheetField = container.createDiv('auditor-field');
+		sheetField.createEl('label', { text: 'Sheet', cls: 'auditor-field-label' });
+		const sheetSelect = sheetField.createEl('select');
+		sheetSelect.disabled = true;
+		sheetSelect.createEl('option', { text: '— choose a file first —', value: '' });
+		sheetSelect.addEventListener('change', () => { this.selectedSheet = sheetSelect.value; });
 
 		const statusEl = container.createDiv('auditor-status');
-		const initBtn = container.createEl('button', { text: 'Initialize', cls: 'mod-cta' });
-		initBtn.addEventListener('click', () => {
+
+		fileSelect.addEventListener('change', () => {
+			void (async () => {
+				this.selectedFile = files.find((f) => f.path === fileSelect.value) ?? null;
+				this.selectedSheet = '';
+				sheetSelect.disabled = true;
+				sheetSelect.empty();
+				if (!this.selectedFile) {
+					sheetSelect.createEl('option', { text: '— choose a file first —', value: '' });
+					return;
+				}
+				statusEl.setText('Reading sheet names…');
+				try {
+					this.sheetNames = await readWorkbookSheetNames(this.app.vault, this.selectedFile);
+					sheetSelect.empty();
+					for (const name of this.sheetNames) sheetSelect.createEl('option', { text: name, value: name });
+					this.selectedSheet = this.sheetNames[0] ?? '';
+					sheetSelect.value = this.selectedSheet;
+					sheetSelect.disabled = false;
+					statusEl.setText('');
+				} catch (e) {
+					statusEl.setText(`Failed to read workbook: ${String(e)}`);
+				}
+			})();
+		});
+
+		const loadBtn = container.createEl('button', { text: 'Load columns', cls: 'mod-cta' });
+		loadBtn.addEventListener('click', () => {
 			void (async () => {
 				if (!this.selectedFile) { statusEl.setText('Choose a spreadsheet first.'); return; }
-				initBtn.disabled = true;
-				statusEl.setText('Reading workbook…');
+				if (!this.selectedSheet) { statusEl.setText('Choose a sheet first.'); return; }
+				loadBtn.disabled = true;
+				statusEl.setText('Reading sheet…');
 				try {
-					const preview = await readWorkbookPreview(this.app.vault, this.selectedFile);
+					const preview = await readWorkbookPreview(this.app.vault, this.selectedFile, this.selectedSheet);
 					this.headers = preview.headers;
-					statusEl.setText(`${preview.rowCount} row(s), ${preview.headers.length} column(s). Asking the model to map columns…`);
-					const result = await this.plugin.geminiGenerate.mapExcelColumns(preview.headers, preview.sampleRows, this.instructions);
-					this.mapping = result.mapping;
-					this.mappingNotes = result.notes;
+					this.sampleRows = preview.sampleRows;
+					this.mapping = {};
+					statusEl.setText('');
 					this.stage = 'mapping';
 					this.render();
 				} catch (e) {
 					statusEl.setText(`Failed: ${String(e)}`);
-					initBtn.disabled = false;
+					loadBtn.disabled = false;
 				}
 			})();
 		});
 	}
 
-	// ─── Stage 2: review/edit mapping ──────────────────────────────────────
+	// ─── Stage 2: manually assign a column to each field ───────────────────
 
 	private renderMapping(container: HTMLElement): void {
-		container.createEl('p', { text: 'Review the column mapping the model proposed, and correct anything that looks wrong.' });
-		if (this.mappingNotes) {
-			container.createEl('p', { text: this.mappingNotes, cls: 'auditor-status' });
+		container.createEl('p', { text: `Assign a column from "${this.selectedSheet}" to each control field. Leave a field unmapped to skip it.` });
+
+		if (this.sampleRows.length > 0) {
+			const tableWrap = container.createDiv('auditor-import-preview-wrap');
+			const table = tableWrap.createEl('table', { cls: 'auditor-import-preview-table' });
+			const headRow = table.createEl('thead').createEl('tr');
+			for (const header of this.headers) headRow.createEl('th', { text: header });
+			const tbody = table.createEl('tbody');
+			for (const row of this.sampleRows) {
+				const tr = tbody.createEl('tr');
+				for (let i = 0; i < this.headers.length; i++) tr.createEl('td', { text: row[i] ?? '' });
+			}
 		}
 
 		const grid = container.createDiv('auditor-compact-grid');
@@ -140,18 +180,118 @@ export class ImportControlsModal extends Modal {
 			});
 		}
 
+		const gateWrap = container.createDiv('auditor-field');
+		gateWrap.createEl('label', { text: 'Import gate column', cls: 'auditor-field-label' });
+		const gateSelect = gateWrap.createEl('select');
+		gateSelect.createEl('option', { text: '(None)', value: '' });
+		for (const header of this.headers) {
+			const opt = gateSelect.createEl('option', { text: header, value: header });
+			if (this.gateColumn === header) opt.selected = true;
+		}
+		gateSelect.addEventListener('change', () => { this.gateColumn = gateSelect.value; });
+		gateWrap.createEl('p', {
+			text: 'Optional. If set, a row is only imported when this column has a non-empty value — leave unset to import every row.',
+			cls: 'auditor-field-description',
+		});
+
+		const commentWrap = container.createDiv('auditor-field');
+		commentWrap.createEl('label', { text: 'Comment column', cls: 'auditor-field-label' });
+		const commentSelect = commentWrap.createEl('select');
+		commentSelect.createEl('option', { text: '(None)', value: '' });
+		for (const header of this.headers) {
+			const opt = commentSelect.createEl('option', { text: header, value: header });
+			if (this.commentColumn === header) opt.selected = true;
+		}
+		commentSelect.addEventListener('change', () => { this.commentColumn = commentSelect.value; });
+		commentWrap.createEl('p', {
+			text: "Optional. If set, a non-empty value in this column is added as this control's first comment, dated today.",
+			cls: 'auditor-field-description',
+		});
+
+		const statusEl = container.createDiv('auditor-status');
 		const actions = container.createDiv('auditor-research-actions');
 		const backBtn = actions.createEl('button', { text: 'Back' });
 		backBtn.addEventListener('click', () => { this.stage = 'setup'; this.render(); });
-		const startBtn = actions.createEl('button', { text: 'Start import', cls: 'mod-cta' });
+		const startBtn = actions.createEl('button', { text: 'Continue', cls: 'mod-cta' });
 		startBtn.addEventListener('click', () => {
+			void (async () => {
+				if (!this.selectedFile) return;
+				startBtn.disabled = true;
+				statusEl.setText('Reading rows…');
+				try {
+					this.pendingRecords = await this.buildRecords();
+					this.overwritePaths = this.pendingRecords
+						.map((r) => this.plugin.controlNotePath(r))
+						.filter((path) => this.app.vault.getAbstractFileByPath(path) !== null);
+					this.stage = 'confirm';
+					this.render();
+				} catch (e) {
+					statusEl.setText(`Failed: ${String(e)}`);
+					startBtn.disabled = false;
+				}
+			})();
+		});
+	}
+
+	private async buildRecords(): Promise<ControlRecord[]> {
+		if (!this.selectedFile) return [];
+		const rows = await readWorkbookRows(this.app.vault, this.selectedFile, this.selectedSheet);
+		const columnIndex = new Map(this.headers.map((h, i) => [h, i]));
+		const gateIndex = this.gateColumn ? columnIndex.get(this.gateColumn) : undefined;
+		const commentIndex = this.commentColumn ? columnIndex.get(this.commentColumn) : undefined;
+		const records: ControlRecord[] = [];
+		for (const row of rows) {
+			if (gateIndex !== undefined && !(row[gateIndex] ?? '').trim()) continue;
+			const record = emptyControlRecord();
+			for (const key of CONTROL_FIELD_KEYS) {
+				const header = this.mapping[key];
+				if (!header) continue;
+				const index = columnIndex.get(header);
+				const raw = index === undefined ? '' : (row[index] ?? '');
+				if (key === 'todRating' || key === 'toeRating') record[key] = normalizeRating(raw);
+				else record[key] = raw;
+			}
+			if (commentIndex !== undefined) {
+				const commentText = (row[commentIndex] ?? '').trim();
+				if (commentText) record.comments.push({ date: todayIsoDate(), text: commentText });
+			}
+			records.push(record);
+		}
+		return records;
+	}
+
+	// ─── Stage 3: confirm overwrites ────────────────────────────────────────
+
+	private renderConfirm(container: HTMLElement): void {
+		container.createEl('p', { text: `${this.pendingRecords.length} control note(s) will be written.` });
+
+		if (this.overwritePaths.length > 0) {
+			container.createEl('p', {
+				text: `${this.overwritePaths.length} of these already exist and will be OVERWRITTEN if you continue:`,
+				cls: 'auditor-status',
+			});
+			const listWrap = container.createDiv('auditor-import-preview-wrap');
+			const list = listWrap.createEl('ul', { cls: 'auditor-import-overwrite-list' });
+			for (const path of this.overwritePaths) list.createEl('li', { text: path });
+		} else {
+			container.createEl('p', { text: 'No existing notes will be overwritten — all will be created as new.' });
+		}
+
+		const actions = container.createDiv('auditor-research-actions');
+		const backBtn = actions.createEl('button', { text: 'Back' });
+		backBtn.addEventListener('click', () => { this.stage = 'mapping'; this.render(); });
+		const confirmBtn = actions.createEl('button', {
+			text: this.overwritePaths.length > 0 ? 'Overwrite and import' : 'Start import',
+			cls: 'mod-cta',
+		});
+		confirmBtn.addEventListener('click', () => {
 			this.stage = 'importing';
 			this.render();
 			void this.runImport();
 		});
 	}
 
-	// ─── Stage 3: direct copy + write ──────────────────────────────────────
+	// ─── Stage 4: direct copy + write ──────────────────────────────────────
 
 	private progressEl!: HTMLElement;
 	private summaryEl!: HTMLElement;
@@ -170,34 +310,15 @@ export class ImportControlsModal extends Modal {
 	}
 
 	private async runImport(): Promise<void> {
-		if (!this.selectedFile) return;
-		this.progressEl.setText('Reading rows…');
-		const rows = await readWorkbookRows(this.app.vault, this.selectedFile);
-
-		const columnIndex = new Map(this.headers.map((h, i) => [h, i]));
-		const records: ControlRecord[] = [];
-		for (const row of rows) {
-			if (this.cancelled) break;
-			const record = emptyControlRecord();
-			for (const key of CONTROL_FIELD_KEYS) {
-				const header = this.mapping[key];
-				if (!header) continue;
-				const index = columnIndex.get(header);
-				const raw = index === undefined ? '' : (row[index] ?? '');
-				if (key === 'todRating' || key === 'toeRating') record[key] = normalizeRating(raw);
-				else record[key] = raw;
-			}
-			records.push(record);
-		}
-
-		this.progressEl.setText(this.cancelled ? 'Cancelled. Writing what was mapped so far…' : 'Writing control notes…');
-		const { written, failed } = await this.plugin.importControlRecords(records);
+		const records = this.cancelled ? [] : this.pendingRecords;
+		this.progressEl.setText('Writing control notes…');
+		const { written, failed } = await this.plugin.importControlRecords(records, this.overwritePaths.length > 0);
 
 		this.stage = 'done';
 		this.render();
 		this.progressEl.setText(this.cancelled ? 'Import cancelled.' : 'Import complete.');
 		const lines = [
-			`${written} control note(s) written out of ${rows.length} row(s).`,
+			`${written} control note(s) written out of ${this.pendingRecords.length} row(s).`,
 			...(failed.length > 0 ? [`${failed.length} record(s) failed to save.`] : []),
 		];
 		for (const line of lines) this.summaryEl.createEl('p', { text: line });

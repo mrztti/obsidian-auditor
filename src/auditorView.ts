@@ -1,34 +1,45 @@
 import { ItemView, TFile, WorkspaceLeaf } from 'obsidian';
 import type AuditorPlugin from './main';
 import type { StoreKind } from './main';
-import type { ControlAnalysis, FinalizationPlan, ResearchAssessment } from './geminiGenerate';
+import type {
+	ControlAnalysis,
+	FinalizationPlan,
+	ResearchAssessment,
+} from './geminiGenerate';
 import type { IndexSummary, SearchResult } from './vectorStore';
 import type { ThroughputSample } from './rateLimiter';
 import {
 	emptyControlRecord,
 	buildControlNoteContent,
 	parseControlNoteContent,
-	sanitizeFileTitle,
-	statusSlug,
 	type ControlRecord,
 } from './controlNote';
 import { renderControlRecordFields } from './controlFields';
-import { EditControlModal } from './editControlModal';
-import { ImportControlsModal } from './importControlsModal';
 import { renderChatMarkdownInto } from './markdown';
+import {
+	emptyEvidenceGoal,
+	type EvidenceGoal,
+	type InterviewSessionPlan,
+} from './evidenceGoal';
 
 const GRAPH_WINDOW_SECONDS = 60;
 
 export const AUDITOR_VIEW_TYPE = 'auditor-main-view';
 
-type TabName = 'indexes' | 'search' | 'pipeline' | 'controls' | 'stage2' | 'chat';
+type TabName =
+	| 'indexes'
+	| 'search'
+	| 'pipeline'
+	| 'stage2'
+	| 'prepareSession'
+	| 'chat';
 
 const TAB_LABELS: Record<TabName, string> = {
 	indexes: 'Indexes',
 	search: 'Document search',
 	pipeline: 'Control drafting',
-	controls: 'Controls',
 	stage2: 'Stage 2 evidence',
+	prepareSession: 'Prepare session',
 	chat: 'Chat',
 };
 
@@ -67,7 +78,10 @@ interface PipelineState {
 	stepsPerformed: StepLogEntry[];
 }
 
-function emptyPipelineState(controlInput: string, defaultWritingRules: string): PipelineState {
+function emptyPipelineState(
+	controlInput: string,
+	defaultWritingRules: string,
+): PipelineState {
 	return {
 		controlInput,
 		standardsResults: [],
@@ -99,16 +113,32 @@ interface FinalizationCandidate {
 	result: SearchResult;
 }
 
-function buildFinalizationCandidates(state: PipelineState): FinalizationCandidate[] {
+function buildFinalizationCandidates(
+	state: PipelineState,
+): FinalizationCandidate[] {
 	const evidenceItems = [...state.evidenceFindings.values()].flat();
-	const controlItems = state.similarResults.filter((_, i) => state.selectedSimilar.has(i));
+	const controlItems = state.similarResults.filter((_, i) =>
+		state.selectedSimilar.has(i),
+	);
 	let index = 0;
 	const candidates: FinalizationCandidate[] = [];
 	for (const result of evidenceItems) {
-		candidates.push({ index: index++, label: sourceLabel(result), kind: 'evidence', text: result.text, result });
+		candidates.push({
+			index: index++,
+			label: sourceLabel(result),
+			kind: 'evidence',
+			text: result.text,
+			result,
+		});
 	}
 	for (const result of controlItems) {
-		candidates.push({ index: index++, label: sourceLabel(result), kind: 'control', text: result.text, result });
+		candidates.push({
+			index: index++,
+			label: sourceLabel(result),
+			kind: 'control',
+			text: result.text,
+			result,
+		});
 	}
 	return candidates;
 }
@@ -121,8 +151,10 @@ const SEARCH_STORE_LABELS: Record<StoreKind, string> = {
 };
 
 function sourceLabel(result: SearchResult): string {
-	if (result.page !== undefined) return `${result.sourcePath} (p. ${result.page})`;
-	if (result.line !== undefined) return `${result.sourcePath} (L${result.line})`;
+	if (result.page !== undefined)
+		return `${result.sourcePath} (p. ${result.page})`;
+	if (result.line !== undefined)
+		return `${result.sourcePath} (L${result.line})`;
 	return result.sourcePath;
 }
 
@@ -139,14 +171,19 @@ function buildControlUnderstandingText(state: PipelineState): string {
 		})
 		.join('\n\n');
 	const refsText = analysis.references
-		.map((r) => `${r.standardName}${r.controlNumber ? ` ${r.controlNumber}` : ''}: ${r.excerpt}`)
+		.map(
+			(r) =>
+				`${r.standardName}${r.controlNumber ? ` ${r.controlNumber}` : ''}: ${r.excerpt}`,
+		)
 		.join('\n');
 	const memory = state.currentMemory || analysis.memorySummary;
 	return [
 		selectedText,
 		refsText ? `Referenced standards:\n${refsText}` : '',
 		memory ? `Requirements to verify:\n${memory}` : '',
-	].filter(Boolean).join('\n\n');
+	]
+		.filter(Boolean)
+		.join('\n\n');
 }
 
 /** Concatenates evidence findings per target document, for the research-progress assessment call. */
@@ -156,9 +193,12 @@ function buildFindingsText(state: PipelineState): string {
 	for (const [docIndex, results] of state.evidenceFindings) {
 		const doc = state.analysis.targetDocuments[docIndex];
 		if (!doc) continue;
-		const resultsText = results.length > 0
-			? results.map((r) => `- [${sourceLabel(r)}] ${r.text}`).join('\n')
-			: '(no results found)';
+		const resultsText =
+			results.length > 0
+				? results
+						.map((r) => `- [${sourceLabel(r)}] ${r.text}`)
+						.join('\n')
+				: '(no results found)';
 		parts.push(`## ${doc.file}\n${resultsText}`);
 	}
 	return parts.join('\n\n');
@@ -215,22 +255,33 @@ export class AuditorView extends ItemView {
 			indexes: container.createDiv('auditor-tab-content'),
 			search: container.createDiv('auditor-tab-content'),
 			pipeline: container.createDiv('auditor-tab-content'),
-			controls: container.createDiv('auditor-tab-content'),
 			stage2: container.createDiv('auditor-tab-content'),
+			prepareSession: container.createDiv('auditor-tab-content'),
 			chat: container.createDiv('auditor-tab-content'),
 		};
 
-		const tabButtons: Record<TabName, HTMLButtonElement> = {} as Record<TabName, HTMLButtonElement>;
+		const tabButtons: Record<TabName, HTMLButtonElement> = {} as Record<
+			TabName,
+			HTMLButtonElement
+		>;
 		const setActiveTab = (name: TabName) => {
 			(Object.keys(tabContents) as TabName[]).forEach((key) => {
-				tabContents[key].toggleClass('auditor-tab-hidden', key !== name);
+				tabContents[key].toggleClass(
+					'auditor-tab-hidden',
+					key !== name,
+				);
 				tabButtons[key].toggleClass('is-active', key === name);
 			});
 		};
 
 		(Object.keys(TAB_LABELS) as TabName[]).forEach((name) => {
-			const btn = tabBar.createEl('button', { text: TAB_LABELS[name], cls: 'auditor-tab-btn' });
-			btn.addEventListener('click', () => { setActiveTab(name); });
+			const btn = tabBar.createEl('button', {
+				text: TAB_LABELS[name],
+				cls: 'auditor-tab-btn',
+			});
+			btn.addEventListener('click', () => {
+				setActiveTab(name);
+			});
 			tabButtons[name] = btn;
 		});
 
@@ -238,8 +289,8 @@ export class AuditorView extends ItemView {
 		this.renderSearchTab(tabContents.search);
 		this.pipelineEl = tabContents.pipeline;
 		this.renderPipelineStart();
-		this.renderControlsTab(tabContents.controls);
 		this.renderStage2Tab(tabContents.stage2);
+		this.renderPrepareSessionTab(tabContents.prepareSession);
 		this.renderChatTab(tabContents.chat);
 
 		setActiveTab('indexes');
@@ -255,21 +306,37 @@ export class AuditorView extends ItemView {
 		const reindexRow = container.createDiv('auditor-reindex-row');
 		this.createReindexButton(reindexRow, 'Re-index standards', 'standards');
 		this.createReindexButton(reindexRow, 'Re-index evidence', 'evidence');
-		this.createReindexButton(reindexRow, 'Re-index written controls', 'writtenControls');
-		this.createReindexButton(reindexRow, 'Re-index interview evidence', 'interviewEvidence');
+		this.createReindexButton(
+			reindexRow,
+			'Re-index written controls',
+			'writtenControls',
+		);
+		this.createReindexButton(
+			reindexRow,
+			'Re-index interview evidence',
+			'interviewEvidence',
+		);
+		this.createEvidenceGoalReindexButton(reindexRow);
 
 		const rateRow = container.createDiv('auditor-rate-row');
-		const rampLabel = rateRow.createEl('label', { cls: 'auditor-search-store-option' });
+		const rampLabel = rateRow.createEl('label', {
+			cls: 'auditor-search-store-option',
+		});
 		const rampToggle = rampLabel.createEl('input', { type: 'checkbox' });
 		rampToggle.checked = this.plugin.settings.gradualRampUp;
 		rampToggle.addEventListener('change', () => {
 			void (async () => {
 				this.plugin.settings.gradualRampUp = rampToggle.checked;
-				this.plugin.rateLimiter.updateConfig(this.plugin.settings.maxRequestsPerSecond, rampToggle.checked);
+				this.plugin.rateLimiter.updateConfig(
+					this.plugin.settings.maxRequestsPerSecond,
+					rampToggle.checked,
+				);
 				await this.plugin.saveSettings();
 			})();
 		});
-		rampLabel.createSpan({ text: 'Gradual increase (ramp up request rate instead of starting at full speed)' });
+		rampLabel.createSpan({
+			text: 'Gradual increase (ramp up request rate instead of starting at full speed)',
+		});
 
 		this.renderThroughputGraph(container);
 	}
@@ -291,11 +358,19 @@ export class AuditorView extends ItemView {
 		graphEl.appendChild(svg);
 
 		const legend = graphEl.createDiv('auditor-throughput-legend');
-		legend.createSpan({ text: '— requests/s', cls: 'auditor-throughput-legend-requests' });
-		legend.createSpan({ text: '— KB/s', cls: 'auditor-throughput-legend-tokens' });
+		legend.createSpan({
+			text: '— requests/s',
+			cls: 'auditor-throughput-legend-requests',
+		});
+		legend.createSpan({
+			text: '— KB/s',
+			cls: 'auditor-throughput-legend-tokens',
+		});
 
 		const draw = () => {
-			const samples = this.plugin.rateLimiter.getSamples().slice(-GRAPH_WINDOW_SECONDS);
+			const samples = this.plugin.rateLimiter
+				.getSamples()
+				.slice(-GRAPH_WINDOW_SECONDS);
 			if (samples.length === 0) {
 				statsEl.setText('No embedding activity yet.');
 				requestsPath.setAttribute('points', '');
@@ -309,21 +384,38 @@ export class AuditorView extends ItemView {
 			const toPoints = (values: number[], maxY: number) =>
 				values
 					.map((v, i) => {
-						const x = (i / Math.max(1, GRAPH_WINDOW_SECONDS - 1)) * 300;
+						const x =
+							(i / Math.max(1, GRAPH_WINDOW_SECONDS - 1)) * 300;
 						const y = 58 - (v / maxY) * 56;
 						return `${x.toFixed(1)},${y.toFixed(1)}`;
 					})
 					.join(' ');
 			// Left-pad so the line always ends at the right edge, growing from an empty window.
 			const padded: ThroughputSample[] = [
-				...Array<ThroughputSample | null>(Math.max(0, GRAPH_WINDOW_SECONDS - samples.length)).fill(null),
+				...Array<ThroughputSample | null>(
+					Math.max(0, GRAPH_WINDOW_SECONDS - samples.length),
+				).fill(null),
 				...samples,
 			].map((s) => s ?? { time: 0, requests: 0, tokens: 0, bytes: 0 });
-			requestsPath.setAttribute('points', toPoints(padded.map((s) => s.requests), maxRequests));
-			kbPath.setAttribute('points', toPoints(padded.map((s) => s.bytes / 1024), maxKb));
+			requestsPath.setAttribute(
+				'points',
+				toPoints(
+					padded.map((s) => s.requests),
+					maxRequests,
+				),
+			);
+			kbPath.setAttribute(
+				'points',
+				toPoints(
+					padded.map((s) => s.bytes / 1024),
+					maxKb,
+				),
+			);
 
 			const last = samples[samples.length - 1]!;
-			statsEl.setText(`${last.requests} req/s, ${(last.bytes / 1024).toFixed(1)} KB/s`);
+			statsEl.setText(
+				`${last.requests} req/s, ${(last.bytes / 1024).toFixed(1)} KB/s`,
+			);
 		};
 
 		draw();
@@ -331,9 +423,16 @@ export class AuditorView extends ItemView {
 		this.unsubscribeThroughput = this.plugin.rateLimiter.onChange(draw);
 	}
 
-	private createReindexButton(container: HTMLElement, label: string, kind: StoreKind): void {
+	private createReindexButton(
+		container: HTMLElement,
+		label: string,
+		kind: StoreKind,
+	): void {
 		const wrapper = container.createDiv('auditor-reindex-item');
-		const btn = wrapper.createEl('button', { text: label, cls: 'mod-muted' });
+		const btn = wrapper.createEl('button', {
+			text: label,
+			cls: 'mod-muted',
+		});
 		const status = wrapper.createDiv('auditor-reindex-status');
 		const activeList = wrapper.createDiv('auditor-active-files');
 
@@ -359,15 +458,39 @@ export class AuditorView extends ItemView {
 				);
 				btn.disabled = false;
 				renderActiveFiles([]);
-				status.setText(summary ? this.formatSummary(summary) : 'Indexing failed — see notice.');
+				status.setText(
+					summary
+						? this.formatSummary(summary)
+						: 'Indexing failed — see notice.',
+				);
+			})();
+		});
+	}
+
+	/** Unlike `createReindexButton`, the evidence-goal index isn't a `StoreKind`/`AuditVectorStore` — it's a small, always-full-rebuild index over session plan notes, so this just wraps `plugin.reindexEvidenceGoals()`. */
+	private createEvidenceGoalReindexButton(container: HTMLElement): void {
+		const wrapper = container.createDiv('auditor-reindex-item');
+		const btn = wrapper.createEl('button', { text: 'Re-index evidence goals', cls: 'mod-muted' });
+		const status = wrapper.createDiv('auditor-reindex-status');
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				status.setText('Indexing…');
+				await this.plugin.reindexEvidenceGoals();
+				btn.disabled = false;
+				status.setText('Done.');
 			})();
 		});
 	}
 
 	/** Recap text: how many files were newly indexed vs. skipped, and why. */
 	private formatSummary(summary: IndexSummary): string {
-		const parts = [`${summary.indexed} indexed`, `${summary.skippedUnchanged} unchanged (skipped)`];
-		if (summary.skippedUnreadable > 0) parts.push(`${summary.skippedUnreadable} unreadable (skipped)`);
+		const parts = [
+			`${summary.indexed} indexed`,
+			`${summary.skippedUnchanged} unchanged (skipped)`,
+		];
+		if (summary.skippedUnreadable > 0)
+			parts.push(`${summary.skippedUnreadable} unreadable (skipped)`);
 		if (summary.removed > 0) parts.push(`${summary.removed} removed`);
 		const prefix = summary.cancelled ? 'Cancelled — ' : '';
 		return `${prefix}${summary.totalFiles} files: ${parts.join(', ')}.`;
@@ -376,20 +499,31 @@ export class AuditorView extends ItemView {
 	// ─── Document search tab ────────────────────────────────────────────────
 
 	private renderSearchTab(container: HTMLElement): void {
-		const promptEl = container.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
+		const promptEl = container.createEl('textarea', {
+			cls: 'auditor-pipeline-textarea',
+		});
 		promptEl.rows = 3;
 		promptEl.placeholder = 'What are you looking for?';
 
 		const controlsRow = container.createDiv('auditor-search-controls-row');
 
 		const storeRow = controlsRow.createDiv('auditor-search-store-row');
-		(['standards', 'evidence', 'writtenControls'] as StoreKind[]).forEach((kind) => {
-			const label = storeRow.createEl('label', { cls: 'auditor-search-store-option' });
-			const radio = label.createEl('input', { type: 'radio', attr: { name: 'auditor-search-store' } });
-			radio.checked = kind === this.searchStoreKind;
-			radio.addEventListener('change', () => { if (radio.checked) this.searchStoreKind = kind; });
-			label.createSpan({ text: SEARCH_STORE_LABELS[kind] });
-		});
+		(['standards', 'evidence', 'writtenControls'] as StoreKind[]).forEach(
+			(kind) => {
+				const label = storeRow.createEl('label', {
+					cls: 'auditor-search-store-option',
+				});
+				const radio = label.createEl('input', {
+					type: 'radio',
+					attr: { name: 'auditor-search-store' },
+				});
+				radio.checked = kind === this.searchStoreKind;
+				radio.addEventListener('change', () => {
+					if (radio.checked) this.searchStoreKind = kind;
+				});
+				label.createSpan({ text: SEARCH_STORE_LABELS[kind] });
+			},
+		);
 
 		const topKWrapper = controlsRow.createDiv('auditor-search-topk');
 		topKWrapper.createSpan({ text: 'Top K:' });
@@ -398,14 +532,26 @@ export class AuditorView extends ItemView {
 		topKInput.min = '1';
 		topKInput.max = '50';
 
-		const searchBtn = container.createEl('button', { text: 'Search', cls: 'mod-cta' });
+		const searchBtn = container.createEl('button', {
+			text: 'Search',
+			cls: 'mod-cta',
+		});
 		const resultsEl = container.createDiv('auditor-search-results');
 
 		searchBtn.addEventListener('click', () => {
 			const prompt = promptEl.value.trim();
 			if (!prompt) return;
-			const topK = Math.max(1, Number(topKInput.value) || DEFAULT_SEARCH_TOP_K);
-			void this.runDocumentSearch(prompt, this.searchStoreKind, topK, searchBtn, resultsEl);
+			const topK = Math.max(
+				1,
+				Number(topKInput.value) || DEFAULT_SEARCH_TOP_K,
+			);
+			void this.runDocumentSearch(
+				prompt,
+				this.searchStoreKind,
+				topK,
+				searchBtn,
+				resultsEl,
+			);
 		});
 	}
 
@@ -419,9 +565,13 @@ export class AuditorView extends ItemView {
 	): Promise<void> {
 		resultsEl.empty();
 		searchBtn.disabled = true;
-		const status = this.showStatus(resultsEl, 'Generating search keywords…');
+		const status = this.showStatus(
+			resultsEl,
+			'Generating search keywords…',
+		);
 		try {
-			const keywords = await this.plugin.geminiGenerate.generateSearchKeywords(prompt);
+			const keywords =
+				await this.plugin.geminiGenerate.generateSearchKeywords(prompt);
 
 			const keywordsEl = resultsEl.createDiv('auditor-search-keywords');
 			keywordsEl.createEl('h5', { text: 'Search description' });
@@ -437,37 +587,65 @@ export class AuditorView extends ItemView {
 				return;
 			}
 
-			status.setText('Asking Gemini to select the most relevant snippets…');
+			status.setText('Selecting the most relevant snippets…');
 			const rerank = await this.plugin.geminiGenerate.rerankSnippets(
 				prompt,
-				results.map((r, i) => ({ index: i, label: sourceLabel(r), text: r.text })),
+				results.map((r, i) => ({
+					index: i,
+					label: sourceLabel(r),
+					text: r.text,
+				})),
 			);
 			status.remove();
 
 			this.renderThinking(resultsEl, rerank.thinking);
 
 			if (rerank.response) {
-				const responseEl = resultsEl.createDiv('auditor-search-response');
+				const responseEl = resultsEl.createDiv(
+					'auditor-search-response',
+				);
 				responseEl.createEl('h5', { text: 'Answer' });
 				responseEl.createEl('p', { text: rerank.response });
 			}
 
 			const relevantResults = rerank.relevant
-				.map(({ index, excerpt, reason }) => ({ result: results[index], excerpt, reason }))
-				.filter((r): r is { result: SearchResult; excerpt: string; reason: string } => r.result !== undefined);
+				.map(({ index, excerpt, reason }) => ({
+					result: results[index],
+					excerpt,
+					reason,
+				}))
+				.filter(
+					(
+						r,
+					): r is {
+						result: SearchResult;
+						excerpt: string;
+						reason: string;
+					} => r.result !== undefined,
+				);
 
 			if (relevantResults.length > 0) {
 				const filesEl = resultsEl.createDiv('auditor-search-files');
 				filesEl.createEl('h5', { text: 'Files' });
-				const uniquePaths = [...new Set(relevantResults.map((r) => r.result.sourcePath))];
-				const filesList = filesEl.createDiv('auditor-search-files-list');
+				const uniquePaths = [
+					...new Set(relevantResults.map((r) => r.result.sourcePath)),
+				];
+				const filesList = filesEl.createDiv(
+					'auditor-search-files-list',
+				);
 				for (const path of uniquePaths) {
 					const file = this.app.vault.getFileByPath(path);
 					if (!file) {
-						filesList.createDiv({ text: path, cls: 'auditor-search-file-item' });
+						filesList.createDiv({
+							text: path,
+							cls: 'auditor-search-file-item',
+						});
 						continue;
 					}
-					const link = filesList.createEl('a', { text: path, cls: 'auditor-search-file-item auditor-file-link' });
+					const link = filesList.createEl('a', {
+						text: path,
+						cls: 'auditor-search-file-item auditor-file-link',
+					});
 					link.addEventListener('click', (e) => {
 						e.preventDefault();
 						void this.app.workspace.getLeaf('tab').openFile(file);
@@ -477,14 +655,23 @@ export class AuditorView extends ItemView {
 
 			const list = resultsEl.createDiv('auditor-results');
 			if (relevantResults.length === 0) {
-				this.showStatus(list, 'Gemini found no relevant snippets among the retrieved results.');
+				this.showStatus(
+					list,
+					'Gemini found no relevant snippets among the retrieved results.',
+				);
 			}
 			for (const { result, excerpt, reason } of relevantResults) {
 				const card = list.createDiv('auditor-evidence-chip');
 				const main = card.createDiv('auditor-evidence-chip-main');
 				this.createFileLink(main, result);
-				main.createEl('p', { text: reason, cls: 'auditor-evidence-chip-reason' });
-				main.createEl('p', { text: excerpt || result.text, cls: 'auditor-evidence-chip-passage' });
+				main.createEl('p', {
+					text: reason,
+					cls: 'auditor-evidence-chip-reason',
+				});
+				main.createEl('p', {
+					text: excerpt || result.text,
+					cls: 'auditor-evidence-chip-passage',
+				});
 			}
 		} catch (e) {
 			status.setText(`Search failed: ${String(e)}`);
@@ -501,7 +688,10 @@ export class AuditorView extends ItemView {
 			container.createSpan({ text, cls: 'auditor-evidence-chip-label' });
 			return;
 		}
-		const link = container.createEl('a', { text, cls: 'auditor-evidence-chip-label auditor-file-link' });
+		const link = container.createEl('a', {
+			text,
+			cls: 'auditor-evidence-chip-label auditor-file-link',
+		});
 		link.addEventListener('click', (e) => {
 			e.preventDefault();
 			void this.app.workspace.getLeaf('tab').openFile(file);
@@ -511,9 +701,14 @@ export class AuditorView extends ItemView {
 	/** Renders a collapsed-by-default "Model reasoning" block from a thought summary, if present. */
 	private renderThinking(container: HTMLElement, thinking: string): void {
 		if (!thinking) return;
-		const thinkingEl = container.createEl('details', { cls: 'auditor-thinking' });
+		const thinkingEl = container.createEl('details', {
+			cls: 'auditor-thinking',
+		});
 		thinkingEl.createEl('summary', { text: 'Model reasoning' });
-		thinkingEl.createEl('p', { text: thinking, cls: 'auditor-thinking-text' });
+		thinkingEl.createEl('p', {
+			text: thinking,
+			cls: 'auditor-thinking-text',
+		});
 	}
 
 	// ─── Control-drafting pipeline tab ──────────────────────────────────────
@@ -523,35 +718,60 @@ export class AuditorView extends ItemView {
 		this.pipelineEl.empty();
 
 		const autoModeRow = this.pipelineEl.createDiv('auditor-automode-row');
-		const autoModeLabel = autoModeRow.createEl('label', { cls: 'auditor-search-store-option' });
-		const autoModeToggle = autoModeLabel.createEl('input', { type: 'checkbox' });
+		const autoModeLabel = autoModeRow.createEl('label', {
+			cls: 'auditor-search-store-option',
+		});
+		const autoModeToggle = autoModeLabel.createEl('input', {
+			type: 'checkbox',
+		});
 		autoModeToggle.checked = this.autoMode;
-		autoModeToggle.addEventListener('change', () => { this.autoMode = autoModeToggle.checked; });
-		autoModeLabel.createSpan({ text: 'Auto-mode (automatically continue through each step, using default selections, until the draft is ready)' });
+		autoModeToggle.addEventListener('change', () => {
+			this.autoMode = autoModeToggle.checked;
+		});
+		autoModeLabel.createSpan({
+			text: 'Auto-mode (automatically continue through each step, using default selections, until the draft is ready)',
+		});
 
-		this.pipelineHistoryEl = this.pipelineEl.createEl('details', { cls: 'auditor-thinking' });
-		this.pipelineHistoryEl.createEl('summary', { text: 'Pipeline history' });
+		this.pipelineHistoryEl = this.pipelineEl.createEl('details', {
+			cls: 'auditor-thinking',
+		});
+		this.pipelineHistoryEl.createEl('summary', {
+			text: 'Pipeline history',
+		});
 		this.renderStepsLog();
 
 		const step = this.pipelineEl.createDiv('auditor-pipeline-step');
 		step.createEl('h4', { text: '1. Audit control / requirement' });
 
-		const input = step.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
+		const input = step.createEl('textarea', {
+			cls: 'auditor-pipeline-textarea',
+		});
 		input.rows = 3;
-		input.placeholder = 'Paste or describe the audit control / requirement to draft…';
+		input.placeholder =
+			'Paste or describe the audit control / requirement to draft…';
 		input.value = this.pipelineState.controlInput;
 
-		const startBtn = step.createEl('button', { text: 'Search standards', cls: 'mod-cta' });
+		const startBtn = step.createEl('button', {
+			text: 'Search standards',
+			cls: 'mod-cta',
+		});
 		startBtn.addEventListener('click', () => {
-			this.pipelineState = emptyPipelineState(input.value.trim(), this.plugin.settings.defaultWritingRules);
+			this.pipelineState = emptyPipelineState(
+				input.value.trim(),
+				this.plugin.settings.defaultWritingRules,
+			);
 			if (!this.pipelineState.controlInput) return;
-			this.logStep(`Started pipeline for: "${this.pipelineState.controlInput}"`);
+			this.logStep(
+				`Started pipeline for: "${this.pipelineState.controlInput}"`,
+			);
 			void this.runStandardsAnalysis();
 		});
 	}
 
 	private clearStepsAfter(step: number): void {
-		const steps = this.pipelineEl.querySelectorAll('.auditor-pipeline-step');
+		const steps = this.pipelineEl.querySelectorAll(
+			'.auditor-pipeline-step',
+		);
 		steps.forEach((el, i) => {
 			if (i > step) el.remove();
 		});
@@ -569,7 +789,13 @@ export class AuditorView extends ItemView {
 	/** Beeps once, using the Web Audio API (no bundled asset needed) — signals that auto-mode reached the final draft step. */
 	private playNotificationSound(): void {
 		try {
-			const AudioCtx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+			const AudioCtx =
+				window.AudioContext ??
+				(
+					window as unknown as {
+						webkitAudioContext?: typeof AudioContext;
+					}
+				).webkitAudioContext;
 			if (!AudioCtx) return;
 			const ctx = new AudioCtx();
 			const oscillator = ctx.createOscillator();
@@ -577,12 +803,20 @@ export class AuditorView extends ItemView {
 			oscillator.connect(gain);
 			gain.connect(ctx.destination);
 			oscillator.frequency.setValueAtTime(880, ctx.currentTime);
-			oscillator.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.15);
+			oscillator.frequency.exponentialRampToValueAtTime(
+				1320,
+				ctx.currentTime + 0.15,
+			);
 			gain.gain.setValueAtTime(0.15, ctx.currentTime);
-			gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+			gain.gain.exponentialRampToValueAtTime(
+				0.001,
+				ctx.currentTime + 0.4,
+			);
 			oscillator.start();
 			oscillator.stop(ctx.currentTime + 0.4);
-			window.setTimeout(() => { void ctx.close(); }, 500);
+			window.setTimeout(() => {
+				void ctx.close();
+			}, 500);
 		} catch (e) {
 			console.error('[Auditor] failed to play notification sound', e);
 		}
@@ -590,18 +824,28 @@ export class AuditorView extends ItemView {
 
 	/** Appends a step to the running pipeline state log and refreshes its display. */
 	private logStep(label: string): void {
-		this.pipelineState.stepsPerformed.push({ label, timestamp: Date.now() });
+		this.pipelineState.stepsPerformed.push({
+			label,
+			timestamp: Date.now(),
+		});
 		this.renderStepsLog();
 	}
 
 	private renderStepsLog(): void {
 		this.pipelineHistoryEl.empty();
-		this.pipelineHistoryEl.createEl('summary', { text: 'Pipeline history' });
+		this.pipelineHistoryEl.createEl('summary', {
+			text: 'Pipeline history',
+		});
 		if (this.pipelineState.stepsPerformed.length === 0) {
-			this.pipelineHistoryEl.createEl('p', { text: 'No steps performed yet.', cls: 'auditor-status' });
+			this.pipelineHistoryEl.createEl('p', {
+				text: 'No steps performed yet.',
+				cls: 'auditor-status',
+			});
 			return;
 		}
-		const list = this.pipelineHistoryEl.createEl('ol', { cls: 'auditor-history-list' });
+		const list = this.pipelineHistoryEl.createEl('ol', {
+			cls: 'auditor-history-list',
+		});
 		for (const entry of this.pipelineState.stepsPerformed) {
 			const time = new Date(entry.timestamp).toLocaleTimeString();
 			list.createEl('li', { text: `${time} — ${entry.label}` });
@@ -619,20 +863,27 @@ export class AuditorView extends ItemView {
 		step.createEl('h4', { text: '2. Control understanding' });
 		const status = this.showStatus(step, 'Searching standards…');
 		try {
-			this.pipelineState.standardsResults = await this.plugin.standardsIndex.search(
-				this.pipelineState.controlInput,
-				this.plugin.settings.maxResults,
-			);
+			this.pipelineState.standardsResults =
+				await this.plugin.standardsIndex.search(
+					this.pipelineState.controlInput,
+					this.plugin.settings.maxResults,
+				);
 
-			status.setText('Asking Gemini to analyze the control…');
-			this.pipelineState.analysis = await this.plugin.geminiGenerate.analyzeControl(
-				this.pipelineState.controlInput,
-				this.pipelineState.standardsResults.map((r, i) => ({ index: i, label: sourceLabel(r), text: r.text })),
-			);
+			status.setText('Analyzing the control…');
+			this.pipelineState.analysis =
+				await this.plugin.geminiGenerate.analyzeControl(
+					this.pipelineState.controlInput,
+					this.pipelineState.standardsResults.map((r, i) => ({
+						index: i,
+						label: sourceLabel(r),
+						text: r.text,
+					})),
+				);
 			this.pipelineState.targetSelection = new Set(
 				this.pipelineState.analysis.targetDocuments.map((_, i) => i),
 			);
-			this.pipelineState.currentMemory = this.pipelineState.analysis.memorySummary;
+			this.pipelineState.currentMemory =
+				this.pipelineState.analysis.memorySummary;
 			this.logStep('Searched standards and analyzed the control');
 			status.remove();
 			this.renderControlUnderstandingStep(step);
@@ -658,31 +909,52 @@ export class AuditorView extends ItemView {
 			const card = selectedList.createDiv('auditor-evidence-chip');
 			const main = card.createDiv('auditor-evidence-chip-main');
 			this.createFileLink(main, result);
-			if (s.controlNumber) main.createSpan({ text: ` — ${s.controlNumber}`, cls: 'auditor-control-number' });
-			main.createEl('p', { text: s.reason, cls: 'auditor-evidence-chip-reason' });
-			main.createEl('p', { text: s.excerpt, cls: 'auditor-evidence-chip-passage' });
+			if (s.controlNumber)
+				main.createSpan({
+					text: ` — ${s.controlNumber}`,
+					cls: 'auditor-control-number',
+				});
+			main.createEl('p', {
+				text: s.reason,
+				cls: 'auditor-evidence-chip-reason',
+			});
+			main.createEl('p', {
+				text: s.excerpt,
+				cls: 'auditor-evidence-chip-passage',
+			});
 		}
 
 		if (analysis.references.length > 0) {
-			const refsContainer = step.createDiv('auditor-references-container');
+			const refsContainer = step.createDiv(
+				'auditor-references-container',
+			);
 			refsContainer.createEl('h5', { text: 'References' });
 			for (const r of analysis.references) {
 				const card = refsContainer.createDiv('auditor-evidence-chip');
 				const main = card.createDiv('auditor-evidence-chip-main');
 				main.createSpan({
-					text: r.controlNumber ? `${r.standardName} — ${r.controlNumber}` : r.standardName,
+					text: r.controlNumber
+						? `${r.standardName} — ${r.controlNumber}`
+						: r.standardName,
 					cls: 'auditor-evidence-chip-label',
 				});
-				main.createEl('p', { text: r.excerpt, cls: 'auditor-evidence-chip-passage' });
+				main.createEl('p', {
+					text: r.excerpt,
+					cls: 'auditor-evidence-chip-passage',
+				});
 			}
 		}
 
 		const targetsContainer = step.createDiv('auditor-target-docs');
 		targetsContainer.createEl('h5', { text: 'Documents to inspect' });
-		const targetsList = targetsContainer.createDiv('auditor-target-docs-list');
+		const targetsList = targetsContainer.createDiv(
+			'auditor-target-docs-list',
+		);
 		analysis.targetDocuments.forEach((doc, i) => {
 			const item = targetsList.createDiv('auditor-target-doc-item');
-			const label = item.createEl('label', { cls: 'auditor-target-doc-label' });
+			const label = item.createEl('label', {
+				cls: 'auditor-target-doc-label',
+			});
 			const checkbox = label.createEl('input', { type: 'checkbox' });
 			checkbox.checked = this.pipelineState.targetSelection.has(i);
 			checkbox.addEventListener('change', () => {
@@ -690,7 +962,10 @@ export class AuditorView extends ItemView {
 				else this.pipelineState.targetSelection.delete(i);
 			});
 			label.createSpan({ text: doc.file });
-			item.createEl('p', { text: doc.keywords.join(', '), cls: 'auditor-target-doc-keywords' });
+			item.createEl('p', {
+				text: doc.keywords.join(', '),
+				cls: 'auditor-target-doc-keywords',
+			});
 		});
 
 		if (analysis.memorySummary) {
@@ -699,8 +974,13 @@ export class AuditorView extends ItemView {
 			memoryEl.createEl('p', { text: analysis.memorySummary });
 		}
 
-		const searchBtn = step.createEl('button', { text: 'Search for documents', cls: 'mod-cta' });
-		searchBtn.addEventListener('click', () => { void this.runDocumentsResearch(searchBtn); });
+		const searchBtn = step.createEl('button', {
+			text: 'Search for documents',
+			cls: 'mod-cta',
+		});
+		searchBtn.addEventListener('click', () => {
+			void this.runDocumentsResearch(searchBtn);
+		});
 
 		if (this.autoMode) void this.runDocumentsResearch(searchBtn);
 	}
@@ -709,14 +989,19 @@ export class AuditorView extends ItemView {
 	 * Step 3 ("Research"): runs one RAG search per selected target document, concatenates all
 	 * findings, and asks Gemini (with the Step 2 memory) to assess progress and identify gaps.
 	 */
-	private async runDocumentsResearch(searchBtn: HTMLButtonElement): Promise<void> {
+	private async runDocumentsResearch(
+		searchBtn: HTMLButtonElement,
+	): Promise<void> {
 		const analysis = this.pipelineState.analysis;
 		if (!analysis) return;
 		this.clearStepsAfter(1);
 		const step = this.pipelineEl.createDiv('auditor-pipeline-step');
 		step.createEl('h4', { text: '3. Research' });
 		const body = step.createDiv('auditor-research-body');
-		const status = this.showStatus(body, 'Searching evidence for each document…');
+		const status = this.showStatus(
+			body,
+			'Searching evidence for each document…',
+		);
 		searchBtn.disabled = true;
 		try {
 			this.pipelineState.evidenceFindings = new Map();
@@ -726,17 +1011,24 @@ export class AuditorView extends ItemView {
 
 			for (const { doc, i } of targets) {
 				status.setText(`Searching for “${doc.file}”…`);
-				const results = await this.plugin.evidenceIndex.search(doc.keywords.join(', '), this.plugin.settings.maxResults);
+				const results = await this.plugin.evidenceIndex.search(
+					doc.keywords.join(', '),
+					this.plugin.settings.maxResults,
+				);
 				this.pipelineState.evidenceFindings.set(i, results);
 			}
 
-			status.setText('Asking Gemini to assess research progress…');
-			this.pipelineState.researchAssessment = await this.plugin.geminiGenerate.assessResearchProgress(
-				this.pipelineState.currentMemory || analysis.memorySummary,
-				buildFindingsText(this.pipelineState),
+			status.setText('Assessing research progress…');
+			this.pipelineState.researchAssessment =
+				await this.plugin.geminiGenerate.assessResearchProgress(
+					this.pipelineState.currentMemory || analysis.memorySummary,
+					buildFindingsText(this.pipelineState),
+				);
+			this.pipelineState.currentMemory =
+				this.pipelineState.researchAssessment.updatedMemory;
+			this.logStep(
+				`Searched evidence for ${targets.length} document(s) and assessed progress`,
 			);
-			this.pipelineState.currentMemory = this.pipelineState.researchAssessment.updatedMemory;
-			this.logStep(`Searched evidence for ${targets.length} document(s) and assessed progress`);
 			status.remove();
 			this.renderResearchStep(body);
 			this.scrollStepIntoView(step);
@@ -756,20 +1048,27 @@ export class AuditorView extends ItemView {
 		const previous = this.pipelineState.researchAssessment;
 		if (!previous) return;
 		body.empty();
-		const status = this.showStatus(body, 'Refining research assessment with your feedback…');
+		const status = this.showStatus(
+			body,
+			'Refining research assessment with your feedback…',
+		);
 		try {
 			this.pipelineState.researchHistory.push(previous);
-			this.pipelineState.userFeedbackHistory.push(this.pipelineState.userFeedback);
-			this.pipelineState.researchAssessment = await this.plugin.geminiGenerate.assessResearchProgress(
-				this.pipelineState.currentMemory,
-				buildFindingsText(this.pipelineState),
-				{
-					previousProgress: previous.progress,
-					previousGaps: previous.gaps,
-					userFeedback: this.pipelineState.userFeedback,
-				},
+			this.pipelineState.userFeedbackHistory.push(
+				this.pipelineState.userFeedback,
 			);
-			this.pipelineState.currentMemory = this.pipelineState.researchAssessment.updatedMemory;
+			this.pipelineState.researchAssessment =
+				await this.plugin.geminiGenerate.assessResearchProgress(
+					this.pipelineState.currentMemory,
+					buildFindingsText(this.pipelineState),
+					{
+						previousProgress: previous.progress,
+						previousGaps: previous.gaps,
+						userFeedback: this.pipelineState.userFeedback,
+					},
+				);
+			this.pipelineState.currentMemory =
+				this.pipelineState.researchAssessment.updatedMemory;
 			this.logStep('Retried research assessment with feedback');
 			status.remove();
 			this.renderResearchStep(body);
@@ -801,21 +1100,36 @@ export class AuditorView extends ItemView {
 			const gapsEl = body.createDiv('auditor-research-gaps');
 			gapsEl.createEl('h5', { text: 'Missing gaps' });
 			const gapsList = gapsEl.createEl('ul');
-			for (const gap of assessment.gaps) gapsList.createEl('li', { text: gap });
+			for (const gap of assessment.gaps)
+				gapsList.createEl('li', { text: gap });
 		}
 
 		body.createEl('h5', { text: 'Your input on the current progress' });
-		const feedback = body.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
+		const feedback = body.createEl('textarea', {
+			cls: 'auditor-pipeline-textarea',
+		});
 		feedback.rows = 4;
 		feedback.value = this.pipelineState.userFeedback;
-		feedback.addEventListener('input', () => { this.pipelineState.userFeedback = feedback.value; });
+		feedback.addEventListener('input', () => {
+			this.pipelineState.userFeedback = feedback.value;
+		});
 
 		const actionsRow = body.createDiv('auditor-research-actions');
-		const retryBtn = actionsRow.createEl('button', { text: 'Retry with feedback', cls: 'mod-muted' });
-		retryBtn.addEventListener('click', () => { void this.retryResearchWithFeedback(body); });
+		const retryBtn = actionsRow.createEl('button', {
+			text: 'Retry with feedback',
+			cls: 'mod-muted',
+		});
+		retryBtn.addEventListener('click', () => {
+			void this.retryResearchWithFeedback(body);
+		});
 
-		const nextBtn = actionsRow.createEl('button', { text: 'Continue with search for existing controls', cls: 'mod-cta' });
-		nextBtn.addEventListener('click', () => { void this.runSimilarControlsSearch(); });
+		const nextBtn = actionsRow.createEl('button', {
+			text: 'Continue with search for existing controls',
+			cls: 'mod-cta',
+		});
+		nextBtn.addEventListener('click', () => {
+			void this.runSimilarControlsSearch();
+		});
 
 		if (this.autoMode) void this.runSimilarControlsSearch();
 	}
@@ -827,11 +1141,14 @@ export class AuditorView extends ItemView {
 		step.createEl('h4', { text: '4. Similar written controls' });
 		const status = this.showStatus(step, 'Searching written controls…');
 		try {
-			this.pipelineState.similarResults = await this.plugin.writtenControlsIndex.search(
-				buildControlUnderstandingText(this.pipelineState),
-				this.plugin.settings.maxResults,
+			this.pipelineState.similarResults =
+				await this.plugin.writtenControlsIndex.search(
+					buildControlUnderstandingText(this.pipelineState),
+					this.plugin.settings.maxResults,
+				);
+			this.pipelineState.selectedSimilar = new Set(
+				this.pipelineState.similarResults.map((_, i) => i),
 			);
-			this.pipelineState.selectedSimilar = new Set(this.pipelineState.similarResults.map((_, i) => i));
 			this.logStep('Searched for existing written controls');
 			status.remove();
 			this.renderSimilarControlsStep(step);
@@ -842,10 +1159,19 @@ export class AuditorView extends ItemView {
 	}
 
 	private renderSimilarControlsStep(step: HTMLElement): void {
-		this.renderSelectableResultList(step, this.pipelineState.similarResults, this.pipelineState.selectedSimilar);
+		this.renderSelectableResultList(
+			step,
+			this.pipelineState.similarResults,
+			this.pipelineState.selectedSimilar,
+		);
 
-		const nextBtn = step.createEl('button', { text: 'Continue to finalizing', cls: 'mod-cta' });
-		nextBtn.addEventListener('click', () => { void this.runFinalizationPlan(nextBtn); });
+		const nextBtn = step.createEl('button', {
+			text: 'Continue to finalizing',
+			cls: 'mod-cta',
+		});
+		nextBtn.addEventListener('click', () => {
+			void this.runFinalizationPlan(nextBtn);
+		});
 
 		if (this.autoMode) void this.runFinalizationPlan(nextBtn);
 	}
@@ -855,20 +1181,30 @@ export class AuditorView extends ItemView {
 	 * Gemini plan (by index, structured + thinking) what finding will be drawn from each one, shown
 	 * to the auditor as a checklist to include/exclude before the draft is actually generated.
 	 */
-	private async runFinalizationPlan(nextBtn: HTMLButtonElement): Promise<void> {
+	private async runFinalizationPlan(
+		nextBtn: HTMLButtonElement,
+	): Promise<void> {
 		this.clearStepsAfter(3);
 		const step = this.pipelineEl.createDiv('auditor-pipeline-step');
 		step.createEl('h4', { text: '5. Finalizing' });
-		const status = this.showStatus(step, 'Asking Gemini to plan the findings…');
+		const status = this.showStatus(step, 'Planning the findings…');
 		nextBtn.disabled = true;
 		try {
 			const candidates = buildFinalizationCandidates(this.pipelineState);
-			this.pipelineState.finalizationPlan = await this.plugin.geminiGenerate.planFinalization(
-				buildControlUnderstandingText(this.pipelineState),
-				candidates.map((c) => ({ index: c.index, label: c.label, kind: c.kind, text: c.text })),
-			);
+			this.pipelineState.finalizationPlan =
+				await this.plugin.geminiGenerate.planFinalization(
+					buildControlUnderstandingText(this.pipelineState),
+					candidates.map((c) => ({
+						index: c.index,
+						label: c.label,
+						kind: c.kind,
+						text: c.text,
+					})),
+				);
 			// Only pre-check what the LLM actually deemed relevant, not every candidate it was given.
-			this.pipelineState.selectedFinalItems = new Set(this.pipelineState.finalizationPlan.items.map((i) => i.index));
+			this.pipelineState.selectedFinalItems = new Set(
+				this.pipelineState.finalizationPlan.items.map((i) => i.index),
+			);
 			this.logStep(
 				`Planned findings for finalization (${this.pipelineState.finalizationPlan.items.length}/${candidates.length} kept)`,
 			);
@@ -891,18 +1227,36 @@ export class AuditorView extends ItemView {
 
 		const list = step.createDiv('auditor-results');
 		if (plan.items.length === 0) {
-			this.showStatus(list, 'No documents or existing controls to finalize.');
+			this.showStatus(
+				list,
+				'No documents or existing controls to finalize.',
+			);
 		}
 
 		const byIndex = new Map(candidates.map((c) => [c.index, c]));
 		const kept = plan.items
 			.map((item) => ({ item, candidate: byIndex.get(item.index) }))
-			.filter((x): x is { item: typeof plan.items[number]; candidate: FinalizationCandidate } => x.candidate !== undefined);
+			.filter(
+				(
+					x,
+				): x is {
+					item: (typeof plan.items)[number];
+					candidate: FinalizationCandidate;
+				} => x.candidate !== undefined,
+			);
 
 		// Evidence chunks are grouped by their source file, with a master checkbox to toggle the
 		// whole file at once, while each chunk stays individually toggleable underneath it.
-		const evidenceGroups = new Map<string, { item: typeof plan.items[number]; candidate: FinalizationCandidate }[]>();
-		for (const entry of kept.filter((x) => x.candidate.kind === 'evidence')) {
+		const evidenceGroups = new Map<
+			string,
+			{
+				item: (typeof plan.items)[number];
+				candidate: FinalizationCandidate;
+			}[]
+		>();
+		for (const entry of kept.filter(
+			(x) => x.candidate.kind === 'evidence',
+		)) {
 			const path = entry.candidate.result.sourcePath;
 			const group = evidenceGroups.get(path);
 			if (group) group.push(entry);
@@ -911,75 +1265,129 @@ export class AuditorView extends ItemView {
 
 		for (const [, entries] of evidenceGroups) {
 			const groupEl = list.createDiv('auditor-finalization-group');
-			const headerEl = groupEl.createDiv('auditor-finalization-group-header');
-			const masterCheckbox = headerEl.createEl('input', { type: 'checkbox' });
+			const headerEl = groupEl.createDiv(
+				'auditor-finalization-group-header',
+			);
+			const masterCheckbox = headerEl.createEl('input', {
+				type: 'checkbox',
+			});
 			const firstEntry = entries[0]!;
-			headerEl.createSpan({ text: firstEntry.candidate.result.sourcePath, cls: 'auditor-finalization-group-title' });
+			headerEl.createSpan({
+				text: firstEntry.candidate.result.sourcePath,
+				cls: 'auditor-finalization-group-title',
+			});
 
 			const chunkCheckboxes: HTMLInputElement[] = [];
 			const syncMaster = () => {
-				const checkedCount = entries.filter((e) => this.pipelineState.selectedFinalItems.has(e.item.index)).length;
+				const checkedCount = entries.filter((e) =>
+					this.pipelineState.selectedFinalItems.has(e.item.index),
+				).length;
 				masterCheckbox.checked = checkedCount === entries.length;
-				masterCheckbox.indeterminate = checkedCount > 0 && checkedCount < entries.length;
+				masterCheckbox.indeterminate =
+					checkedCount > 0 && checkedCount < entries.length;
 			};
 			masterCheckbox.addEventListener('change', () => {
 				for (const entry of entries) {
-					if (masterCheckbox.checked) this.pipelineState.selectedFinalItems.add(entry.item.index);
-					else this.pipelineState.selectedFinalItems.delete(entry.item.index);
+					if (masterCheckbox.checked)
+						this.pipelineState.selectedFinalItems.add(
+							entry.item.index,
+						);
+					else
+						this.pipelineState.selectedFinalItems.delete(
+							entry.item.index,
+						);
 				}
-				chunkCheckboxes.forEach((cb) => { cb.checked = masterCheckbox.checked; });
+				chunkCheckboxes.forEach((cb) => {
+					cb.checked = masterCheckbox.checked;
+				});
 				masterCheckbox.indeterminate = false;
 			});
 
-			const chunksEl = groupEl.createDiv('auditor-finalization-group-chunks');
+			const chunksEl = groupEl.createDiv(
+				'auditor-finalization-group-chunks',
+			);
 			for (const { item, candidate } of entries) {
 				const card = chunksEl.createDiv('auditor-evidence-chip');
 				const checkbox = card.createEl('input', { type: 'checkbox' });
-				checkbox.checked = this.pipelineState.selectedFinalItems.has(item.index);
+				checkbox.checked = this.pipelineState.selectedFinalItems.has(
+					item.index,
+				);
 				chunkCheckboxes.push(checkbox);
 				checkbox.addEventListener('change', () => {
-					if (checkbox.checked) this.pipelineState.selectedFinalItems.add(item.index);
-					else this.pipelineState.selectedFinalItems.delete(item.index);
+					if (checkbox.checked)
+						this.pipelineState.selectedFinalItems.add(item.index);
+					else
+						this.pipelineState.selectedFinalItems.delete(
+							item.index,
+						);
 					syncMaster();
 				});
 
 				const main = card.createDiv('auditor-evidence-chip-main');
 				this.createFileLink(main, candidate.result);
-				main.createEl('p', { text: item.plannedFinding, cls: 'auditor-evidence-chip-reason' });
+				main.createEl('p', {
+					text: item.plannedFinding,
+					cls: 'auditor-evidence-chip-reason',
+				});
 			}
 			syncMaster();
 		}
 
-		for (const { item, candidate } of kept.filter((x) => x.candidate.kind === 'control')) {
+		for (const { item, candidate } of kept.filter(
+			(x) => x.candidate.kind === 'control',
+		)) {
 			const card = list.createDiv('auditor-evidence-chip');
 			const checkbox = card.createEl('input', { type: 'checkbox' });
-			checkbox.checked = this.pipelineState.selectedFinalItems.has(item.index);
+			checkbox.checked = this.pipelineState.selectedFinalItems.has(
+				item.index,
+			);
 			checkbox.addEventListener('change', () => {
-				if (checkbox.checked) this.pipelineState.selectedFinalItems.add(item.index);
+				if (checkbox.checked)
+					this.pipelineState.selectedFinalItems.add(item.index);
 				else this.pipelineState.selectedFinalItems.delete(item.index);
 			});
 
 			const main = card.createDiv('auditor-evidence-chip-main');
 			this.createFileLink(main, candidate.result);
-			main.createSpan({ text: ' — existing control', cls: 'auditor-control-number' });
-			main.createEl('p', { text: item.plannedFinding, cls: 'auditor-evidence-chip-reason' });
+			main.createSpan({
+				text: ' — existing control',
+				cls: 'auditor-control-number',
+			});
+			main.createEl('p', {
+				text: item.plannedFinding,
+				cls: 'auditor-evidence-chip-reason',
+			});
 		}
 
 		step.createEl('h5', { text: 'Writing rules' });
-		const rulesEl = step.createEl('textarea', { cls: 'auditor-pipeline-textarea auditor-rules-textarea' });
+		const rulesEl = step.createEl('textarea', {
+			cls: 'auditor-pipeline-textarea auditor-rules-textarea',
+		});
 		rulesEl.rows = 16;
 		rulesEl.value = this.pipelineState.writingRules;
-		rulesEl.addEventListener('input', () => { this.pipelineState.writingRules = rulesEl.value; });
+		rulesEl.addEventListener('input', () => {
+			this.pipelineState.writingRules = rulesEl.value;
+		});
 
 		step.createEl('h5', { text: 'Guidance for finalizing the report' });
-		const guidanceEl = step.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
+		const guidanceEl = step.createEl('textarea', {
+			cls: 'auditor-pipeline-textarea',
+		});
 		guidanceEl.rows = 4;
-		guidanceEl.placeholder = 'Anything else the drafting model should take into account…';
+		guidanceEl.placeholder =
+			'Anything else the drafting model should take into account…';
 		guidanceEl.value = this.pipelineState.finalizationGuidance;
-		guidanceEl.addEventListener('input', () => { this.pipelineState.finalizationGuidance = guidanceEl.value; });
+		guidanceEl.addEventListener('input', () => {
+			this.pipelineState.finalizationGuidance = guidanceEl.value;
+		});
 
-		const nextBtn = step.createEl('button', { text: 'Draft control', cls: 'mod-cta' });
-		nextBtn.addEventListener('click', () => { void this.runDraft(); });
+		const nextBtn = step.createEl('button', {
+			text: 'Draft control',
+			cls: 'mod-cta',
+		});
+		nextBtn.addEventListener('click', () => {
+			void this.runDraft();
+		});
 
 		if (this.autoMode) void this.runDraft();
 	}
@@ -995,12 +1403,19 @@ export class AuditorView extends ItemView {
 			const understanding = [
 				buildControlUnderstandingText(this.pipelineState),
 				assessment ? `Research progress:\n${assessment.progress}` : '',
-				assessment && assessment.gaps.length > 0 ? `Remaining gaps:\n${assessment.gaps.join('\n')}` : '',
-				this.pipelineState.userFeedback ? `Auditor's notes:\n${this.pipelineState.userFeedback}` : '',
-			].filter(Boolean).join('\n\n');
+				assessment && assessment.gaps.length > 0
+					? `Remaining gaps:\n${assessment.gaps.join('\n')}`
+					: '',
+				this.pipelineState.userFeedback
+					? `Auditor's notes:\n${this.pipelineState.userFeedback}`
+					: '',
+			]
+				.filter(Boolean)
+				.join('\n\n');
 
-			const included = buildFinalizationCandidates(this.pipelineState)
-				.filter((c) => this.pipelineState.selectedFinalItems.has(c.index));
+			const included = buildFinalizationCandidates(
+				this.pipelineState,
+			).filter((c) => this.pipelineState.selectedFinalItems.has(c.index));
 			const evidenceContext = included
 				.filter((c) => c.kind === 'evidence')
 				.map((c) => `[${c.label}]\n${c.text}`)
@@ -1037,12 +1452,17 @@ export class AuditorView extends ItemView {
 	private renderDraftStep(step: HTMLElement): void {
 		renderControlRecordFields(step, this.pipelineState.draftRecord);
 
-		const saveBtn = step.createEl('button', { text: 'Save as new note', cls: 'mod-cta' });
+		const saveBtn = step.createEl('button', {
+			text: 'Save as new note',
+			cls: 'mod-cta',
+		});
 		const statusEl = step.createDiv();
 		saveBtn.addEventListener('click', () => {
 			void (async () => {
 				try {
-					await this.plugin.saveControlNote(this.pipelineState.draftRecord);
+					await this.plugin.saveControlNote(
+						this.pipelineState.draftRecord,
+					);
 					this.logStep('Saved the draft as a new note');
 					statusEl.setText('Saved.');
 				} catch (e) {
@@ -1052,99 +1472,11 @@ export class AuditorView extends ItemView {
 		});
 	}
 
-	// ─── Controls tab ───────────────────────────────────────────────────────
-
-	private ratingClass(rating: string): string {
-		if (rating === 'NC') return 'auditor-rating-nc';
-		if (rating === 'C*') return 'auditor-rating-cstar';
-		if (rating === 'C') return 'auditor-rating-c';
-		return 'auditor-rating-none';
-	}
-
-	private renderControlsTab(container: HTMLElement): void {
-		const toolbar = container.createDiv('auditor-controls-toolbar');
-		const searchInput = toolbar.createEl('input', { type: 'text', placeholder: 'Filter by number, standard, topic, status…' });
-		const importBtn = toolbar.createEl('button', { text: 'Import controls' });
-		const refreshBtn = toolbar.createEl('button', { text: 'Refresh' });
-		const status = container.createDiv();
-		const grid = container.createDiv('auditor-controls-grid');
-
-		let allEntries: { file: TFile; record: ControlRecord }[] = [];
-
-		const applyFilter = () => {
-			const query = searchInput.value.trim().toLowerCase();
-			grid.empty();
-			const filtered = query
-				? allEntries.filter((e) =>
-					[e.record.number, e.record.standard, e.record.topic, e.record.status]
-						.some((f) => f.toLowerCase().includes(query)))
-				: allEntries;
-			if (filtered.length === 0) {
-				this.showStatus(grid, 'No controls found.');
-				return;
-			}
-			for (const entry of filtered) this.renderControlCard(grid, entry);
-		};
-
-		const load = async () => {
-			status.setText('Loading controls…');
-			grid.empty();
-			const folder = this.plugin.settings.writtenControlsFolder;
-			const files = this.app.vault.getFiles()
-				.filter((f) => f.extension === 'md' && (!folder || f.path === folder || f.path.startsWith(`${folder}/`)));
-			const entries: { file: TFile; record: ControlRecord }[] = [];
-			for (const file of files) {
-				const content = await this.app.vault.cachedRead(file);
-				entries.push({ file, record: parseControlNoteContent(content, file.basename) });
-			}
-			entries.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
-			allEntries = entries;
-			status.setText(`${entries.length} control(s).`);
-			applyFilter();
-		};
-
-		searchInput.addEventListener('input', applyFilter);
-		refreshBtn.addEventListener('click', () => { void load(); });
-		importBtn.addEventListener('click', () => {
-			new ImportControlsModal(this.app, this.plugin, () => { void load(); }).open();
-		});
-		void load();
-	}
-
-	private renderControlCard(grid: HTMLElement, entry: { file: TFile; record: ControlRecord }): void {
-		const card = grid.createDiv(`auditor-control-card auditor-status-${statusSlug(entry.record.status)}`);
-		const summary = card.createDiv('auditor-control-card-summary');
-		summary.createSpan({ text: entry.record.number || '(no number)', cls: 'auditor-control-card-number' });
-		summary.createSpan({ text: entry.record.status, cls: 'auditor-control-card-status' });
-		card.createDiv({ cls: 'auditor-control-card-standard', text: entry.record.standard });
-		card.createDiv({ cls: 'auditor-control-card-topic', text: entry.record.topic });
-		const metaRow = card.createDiv('auditor-control-card-meta');
-		metaRow.createSpan({ text: `Session: ${entry.record.session || '—'}` });
-		metaRow.createSpan({ text: `Assigned: ${entry.record.assignedMember || '—'}` });
-		const ratingsRow = card.createDiv('auditor-control-card-ratings');
-		ratingsRow.createSpan({ text: `ToD: ${entry.record.todRating || '—'}`, cls: `auditor-rating-badge ${this.ratingClass(entry.record.todRating)}` });
-		ratingsRow.createSpan({ text: `ToE: ${entry.record.toeRating || '—'}`, cls: `auditor-rating-badge ${this.ratingClass(entry.record.toeRating)}` });
-
-		card.addEventListener('click', () => {
-			new EditControlModal(this.app, entry.record, async (updated) => {
-				const folder = this.plugin.settings.writtenControlsFolder;
-				const safeNumber = sanitizeFileTitle(updated.number || entry.file.basename);
-				const newPath = folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`;
-				if (newPath !== entry.file.path) {
-					await this.app.fileManager.renameFile(entry.file, newPath);
-				}
-				await this.app.vault.modify(entry.file, buildControlNoteContent(updated));
-				entry.record = updated;
-				this.logStep(`Saved changes to control ${updated.number}`);
-				void this.plugin.runIndexing('writtenControls');
-				card.remove();
-				this.renderControlCard(grid, entry);
-			}).open();
-		});
-	}
-
 	/** Read-only result list. */
-	private renderResultList(container: HTMLElement, results: SearchResult[]): void {
+	private renderResultList(
+		container: HTMLElement,
+		results: SearchResult[],
+	): void {
 		const list = container.createDiv('auditor-results');
 		if (results.length === 0) {
 			this.showStatus(list, 'No results found.');
@@ -1155,14 +1487,21 @@ export class AuditorView extends ItemView {
 			const main = card.createDiv('auditor-evidence-chip-main');
 			this.createFileLink(main, result);
 			main.createEl('p', {
-				text: result.text.length > 600 ? `${result.text.slice(0, 600)}…` : result.text,
+				text:
+					result.text.length > 600
+						? `${result.text.slice(0, 600)}…`
+						: result.text,
 				cls: 'auditor-evidence-chip-passage',
 			});
 		}
 	}
 
 	/** Checkbox-selectable result list (used for the Similar-controls step). */
-	private renderSelectableResultList(container: HTMLElement, results: SearchResult[], selected: Set<number>): void {
+	private renderSelectableResultList(
+		container: HTMLElement,
+		results: SearchResult[],
+		selected: Set<number>,
+	): void {
 		const list = container.createDiv('auditor-results');
 		if (results.length === 0) {
 			this.showStatus(list, 'No results found.');
@@ -1180,7 +1519,10 @@ export class AuditorView extends ItemView {
 			const main = card.createDiv('auditor-evidence-chip-main');
 			this.createFileLink(main, result);
 			main.createEl('p', {
-				text: result.text.length > 600 ? `${result.text.slice(0, 600)}…` : result.text,
+				text:
+					result.text.length > 600
+						? `${result.text.slice(0, 600)}…`
+						: result.text,
 				cls: 'auditor-evidence-chip-passage',
 			});
 		});
@@ -1197,7 +1539,10 @@ export class AuditorView extends ItemView {
 	private renderStage2Tab(container: HTMLElement): void {
 		const toolbar = container.createDiv('auditor-controls-toolbar');
 		const refreshBtn = toolbar.createEl('button', { text: 'Refresh' });
-		const runBtn = toolbar.createEl('button', { text: 'Run selected', cls: 'mod-cta' });
+		const runBtn = toolbar.createEl('button', {
+			text: 'Run selected',
+			cls: 'mod-cta',
+		});
 		runBtn.disabled = true;
 
 		const status = container.createDiv();
@@ -1210,7 +1555,9 @@ export class AuditorView extends ItemView {
 		const renderChecklist = () => {
 			checklistEl.empty();
 			for (const entry of entries) {
-				const row = checklistEl.createDiv('auditor-stage2-checklist-row');
+				const row = checklistEl.createDiv(
+					'auditor-stage2-checklist-row',
+				);
 				const checkbox = row.createEl('input', { type: 'checkbox' });
 				checkbox.checked = selected.has(entry.file.path);
 				checkbox.addEventListener('change', () => {
@@ -1218,11 +1565,23 @@ export class AuditorView extends ItemView {
 					else selected.delete(entry.file.path);
 					runBtn.disabled = selected.size === 0;
 				});
-				row.createSpan({ text: entry.record.number || '(no number)', cls: 'auditor-control-card-number' });
-				row.createSpan({ text: entry.record.standard, cls: 'auditor-stage2-row-meta' });
-				row.createSpan({ text: entry.record.topic, cls: 'auditor-stage2-row-meta' });
+				row.createSpan({
+					text: entry.record.number || '(no number)',
+					cls: 'auditor-control-card-number',
+				});
+				row.createSpan({
+					text: entry.record.standard,
+					cls: 'auditor-stage2-row-meta',
+				});
+				row.createSpan({
+					text: entry.record.topic,
+					cls: 'auditor-stage2-row-meta',
+				});
 				if (entry.record.toeConclusion.trim()) {
-					row.createSpan({ text: 'Has Stage 2', cls: 'auditor-chip auditor-chip-has-stage2' });
+					row.createSpan({
+						text: 'Has Stage 2',
+						cls: 'auditor-chip auditor-chip-has-stage2',
+					});
 				}
 			}
 		};
@@ -1230,20 +1589,36 @@ export class AuditorView extends ItemView {
 		const load = async () => {
 			status.setText('Loading controls…');
 			const folder = this.plugin.settings.writtenControlsFolder;
-			const files = this.app.vault.getFiles()
-				.filter((f) => f.extension === 'md' && (!folder || f.path === folder || f.path.startsWith(`${folder}/`)));
+			const files = this.app.vault
+				.getFiles()
+				.filter(
+					(f) =>
+						f.extension === 'md' &&
+						(!folder ||
+							f.path === folder ||
+							f.path.startsWith(`${folder}/`)),
+				);
 			const loaded: { file: TFile; record: ControlRecord }[] = [];
 			for (const file of files) {
 				const content = await this.app.vault.cachedRead(file);
-				loaded.push({ file, record: parseControlNoteContent(content, file.basename) });
+				loaded.push({
+					file,
+					record: parseControlNoteContent(content, file.basename),
+				});
 			}
-			loaded.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
+			loaded.sort((a, b) =>
+				a.record.number.localeCompare(b.record.number, undefined, {
+					numeric: true,
+				}),
+			);
 			entries = loaded;
 			status.setText(`${entries.length} control(s).`);
 			renderChecklist();
 		};
 
-		refreshBtn.addEventListener('click', () => { void load(); });
+		refreshBtn.addEventListener('click', () => {
+			void load();
+		});
 		runBtn.addEventListener('click', () => {
 			const targets = entries.filter((e) => selected.has(e.file.path));
 			void this.runStage2Batch(targets, progressEl, runBtn);
@@ -1262,7 +1637,10 @@ export class AuditorView extends ItemView {
 		runBtn.disabled = true;
 		progressEl.empty();
 
-		const rowRefs = new Map<string, { spinner: HTMLElement; label: HTMLElement }>();
+		const rowRefs = new Map<
+			string,
+			{ spinner: HTMLElement; label: HTMLElement }
+		>();
 		for (const { file } of targets) {
 			const row = progressEl.createDiv('auditor-active-file-row');
 			const spinner = row.createDiv('auditor-spinner');
@@ -1276,9 +1654,15 @@ export class AuditorView extends ItemView {
 			while (cursor < targets.length) {
 				const target = targets[cursor++]!;
 				const refs = rowRefs.get(target.file.path)!;
-				const setStep = (text: string) => { refs.label.setText(`${target.file.basename}: ${text}`); };
+				const setStep = (text: string) => {
+					refs.label.setText(`${target.file.basename}: ${text}`);
+				};
 				try {
-					await this.runStage2Auto(target.file, target.record, setStep);
+					await this.runStage2Auto(
+						target.file,
+						target.record,
+						setStep,
+					);
 					anySaved = true;
 					setStep('Done');
 					refs.spinner.removeClass('auditor-spinner');
@@ -1291,7 +1675,10 @@ export class AuditorView extends ItemView {
 			}
 		};
 
-		const workerCount = Math.max(1, Math.min(this.plugin.settings.maxConcurrentStage2, targets.length));
+		const workerCount = Math.max(
+			1,
+			Math.min(this.plugin.settings.maxConcurrentStage2, targets.length),
+		);
 		await Promise.all(Array.from({ length: workerCount }, worker));
 
 		if (anySaved) void this.plugin.runIndexing('writtenControls');
@@ -1299,23 +1686,47 @@ export class AuditorView extends ItemView {
 	}
 
 	/** One control's full Stage 2 pipeline: supporting-standards + interview-evidence + related-controls RAG (all results used, none manually curated), draft, then save straight to the file. */
-	private async runStage2Auto(file: TFile, record: ControlRecord, onStep: (text: string) => void): Promise<void> {
-		const query = [record.control, record.todConclusion].filter(Boolean).join('\n\n');
+	private async runStage2Auto(
+		file: TFile,
+		record: ControlRecord,
+		onStep: (text: string) => void,
+	): Promise<void> {
+		const query = [record.control, record.todConclusion]
+			.filter(Boolean)
+			.join('\n\n');
 
 		onStep('Searching standards…');
-		const standardsResults = await this.plugin.standardsIndex.search(query, this.plugin.settings.maxResults);
+		const standardsResults = await this.plugin.standardsIndex.search(
+			query,
+			this.plugin.settings.maxResults,
+		);
 
 		onStep('Searching interview evidence…');
-		const interviewResults = await this.plugin.interviewEvidenceIndex.search(query, this.plugin.settings.maxResults);
+		const interviewResults =
+			await this.plugin.interviewEvidenceIndex.search(
+				query,
+				this.plugin.settings.maxResults,
+			);
 
 		onStep('Searching related controls…');
-		const relatedRaw = await this.plugin.writtenControlsIndex.search(query, this.plugin.settings.maxResults + 1);
-		const relatedResults = relatedRaw.filter((r) => r.sourcePath !== file.path);
+		const relatedRaw = await this.plugin.writtenControlsIndex.search(
+			query,
+			this.plugin.settings.maxResults + 1,
+		);
+		const relatedResults = relatedRaw.filter(
+			(r) => r.sourcePath !== file.path,
+		);
 
 		onStep('Drafting…');
-		const standardsContext = standardsResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
-		const interviewContext = interviewResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
-		const relatedContext = relatedResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+		const standardsContext = standardsResults
+			.map((r) => `[${sourceLabel(r)}]\n${r.text}`)
+			.join('\n\n');
+		const interviewContext = interviewResults
+			.map((r) => `[${sourceLabel(r)}]\n${r.text}`)
+			.join('\n\n');
+		const relatedContext = relatedResults
+			.map((r) => `[${sourceLabel(r)}]\n${r.text}`)
+			.join('\n\n');
 		const draft = await this.plugin.geminiGenerate.draftStage2Control(
 			record.control,
 			record.todConclusion,
@@ -1327,8 +1738,245 @@ export class AuditorView extends ItemView {
 		);
 
 		onStep('Saving…');
-		const updated: ControlRecord = { ...record, toeConclusion: draft.toeConclusion, toeRating: draft.toeRating };
+		const updated: ControlRecord = {
+			...record,
+			toeConclusion: draft.toeConclusion,
+			toeRating: draft.toeRating,
+		};
 		await this.app.vault.modify(file, buildControlNoteContent(updated));
+	}
+
+	// ─── Prepare session tab ────────────────────────────────────────────────
+
+	/**
+	 * Builds Evidence Goals (EGs) for every control in a session, one control at a time and strictly
+	 * in order — each control's planning step sees every EG created/modified by the controls before
+	 * it (via the EG index), so the LLM can genuinely reuse or broaden an existing EG instead of
+	 * creating a near-duplicate. A final compression pass then looks for merges across the finished
+	 * set. Deliberately sequential, unlike the concurrent Stage 2 batch pipeline — concurrency here
+	 * would mean controls processed in parallel can't see each other's new EGs, defeating the point.
+	 */
+	private renderPrepareSessionTab(container: HTMLElement): void {
+		const setupField = container.createDiv('auditor-field');
+		setupField.createEl('label', { text: 'Client setup description', cls: 'auditor-field-label' });
+		setupField.createEl('p', {
+			text: 'A Markdown note describing what the client\'s setup looks like in practice, to the best of our knowledge — used to ground evidence-goal descriptions and questions in what realistically exists.',
+			cls: 'auditor-field-description',
+		});
+		const setupSelect = setupField.createEl('select');
+		setupSelect.createEl('option', { text: '— choose a file —', value: '' });
+		for (const file of this.app.vault.getFiles().filter((f) => f.extension === 'md')) {
+			setupSelect.createEl('option', { text: file.path, value: file.path });
+		}
+
+		const toolbar = container.createDiv('auditor-controls-toolbar');
+		const sessionSelect = toolbar.createEl('select');
+		sessionSelect.createEl('option', { text: '— choose a session —', value: '' });
+		const startBtn = toolbar.createEl('button', { text: 'Prepare session', cls: 'mod-cta' });
+		startBtn.disabled = true;
+
+		const status = container.createDiv('auditor-status');
+		const progressEl = container.createDiv('auditor-stage2-progress');
+		const resultsEl = container.createDiv();
+
+		let allControls: { file: TFile; record: ControlRecord }[] = [];
+
+		const updateStartEnabled = () => {
+			startBtn.disabled = !sessionSelect.value || !setupSelect.value;
+		};
+
+		const loadSessions = async () => {
+			status.setText('Loading sessions…');
+			const folder = this.plugin.settings.writtenControlsFolder;
+			const files = this.app.vault
+				.getFiles()
+				.filter((f) => f.extension === 'md' && (!folder || f.path === folder || f.path.startsWith(`${folder}/`)));
+			const loaded: { file: TFile; record: ControlRecord }[] = [];
+			for (const file of files) {
+				const content = await this.app.vault.cachedRead(file);
+				loaded.push({ file, record: parseControlNoteContent(content, file.basename) });
+			}
+			allControls = loaded;
+			const sessions = [...new Set(loaded.map((e) => e.record.session).filter((s) => s.trim()))].sort((a, b) => a.localeCompare(b));
+			const currentValue = sessionSelect.value;
+			sessionSelect.empty();
+			sessionSelect.createEl('option', { text: '— choose a session —', value: '' });
+			for (const session of sessions) sessionSelect.createEl('option', { text: session, value: session });
+			sessionSelect.value = sessions.includes(currentValue) ? currentValue : '';
+			updateStartEnabled();
+			status.setText(`${sessions.length} session(s) across ${loaded.length} control(s).`);
+		};
+
+		sessionSelect.addEventListener('change', updateStartEnabled);
+		setupSelect.addEventListener('change', updateStartEnabled);
+		startBtn.addEventListener('click', () => {
+			void (async () => {
+				if (!sessionSelect.value || !setupSelect.value) return;
+				const setupFile = this.app.vault.getAbstractFileByPath(setupSelect.value);
+				const setupContext = setupFile instanceof TFile ? await this.app.vault.cachedRead(setupFile) : '';
+				const targets = allControls.filter((e) => e.record.session === sessionSelect.value);
+				void this.runPrepareSession(sessionSelect.value, setupContext, targets, progressEl, resultsEl, startBtn);
+			})();
+		});
+
+		void loadSessions();
+	}
+
+	/** Plain-text context an EG-planning call sees for one control: standard/topic/control text, plus Stage 1/Stage 2 conclusions when present. */
+	private buildEgControlContext(record: ControlRecord): string {
+		return [
+			`Control ${record.number}`,
+			`Standard: ${record.standard}`,
+			`Topic: ${record.topic}`,
+			'',
+			'Control text:',
+			record.control,
+			...(record.todConclusion.trim() ? ['', 'Stage 1 (Test of Design) conclusion:', record.todConclusion] : []),
+			...(record.toeConclusion.trim() ? ['', 'Stage 2 (Test of Effectiveness) conclusion:', record.toeConclusion] : []),
+		].join('\n');
+	}
+
+	private async runPrepareSession(
+		session: string,
+		setupContext: string,
+		targets: { file: TFile; record: ControlRecord }[],
+		progressEl: HTMLElement,
+		resultsEl: HTMLElement,
+		startBtn: HTMLButtonElement,
+	): Promise<void> {
+		startBtn.disabled = true;
+		progressEl.empty();
+		resultsEl.empty();
+
+		let plan: InterviewSessionPlan = await this.plugin.loadSessionPlan(session);
+
+		for (const { record } of targets) {
+			const row = progressEl.createDiv('auditor-active-file-row');
+			const spinner = row.createDiv('auditor-spinner');
+			const label = row.createSpan({ text: `${record.number}: Starting…` });
+			const setStep = (text: string) => { label.setText(`${record.number}: ${text}`); };
+
+			try {
+				const query = [record.control, record.todConclusion, record.toeConclusion].filter(Boolean).join('\n\n');
+
+				setStep('Searching standards…');
+				const standardsResults = await this.plugin.standardsIndex.search(query, this.plugin.settings.maxResults);
+				const standardsContext = standardsResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+
+				setStep('Searching evidence…');
+				const evidenceResults = await this.plugin.evidenceIndex.search(query, this.plugin.settings.maxResults);
+				const evidenceContext = evidenceResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+
+				setStep('Looking for similar evidence goals…');
+				const candidateMatches = await this.plugin.evidenceGoalIndex.search(query, 8, session);
+				const candidateIds = new Set(candidateMatches.map((m) => m.id));
+
+				setStep('Deciding…');
+				const controlContext = this.buildEgControlContext(record);
+				const candidates = plan.evidenceGoals
+					.filter((eg) => candidateIds.has(eg.id))
+					.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, questions: eg.questions, type: eg.type, controlNumbers: eg.controlNumbers }));
+				const result = await this.plugin.geminiGenerate.planEvidenceGoal(controlContext, standardsContext, setupContext, evidenceContext, candidates);
+
+				// A control can need more than one evidence goal (e.g. two distinct config screens) —
+				// apply every decision in turn, against the same in-progress plan, so later decisions in
+				// this same control still see EGs the earlier ones just touched.
+				const touchedNames: string[] = [];
+				for (const decision of result.decisions) {
+					let touchedEg: EvidenceGoal;
+					if (decision.action === 'create') {
+						touchedEg = { ...emptyEvidenceGoal(record.number), name: decision.name, description: decision.description, questions: decision.questions, type: decision.type };
+						plan.evidenceGoals.push(touchedEg);
+						touchedNames.push(`Created "${touchedEg.name}"`);
+					} else {
+						const target = plan.evidenceGoals.find((eg) => eg.id === decision.targetId);
+						if (!target) {
+							// The model referenced an EG that isn't actually in the candidate set — fall back to
+							// creating a new one rather than silently dropping this piece of evidence.
+							touchedEg = { ...emptyEvidenceGoal(record.number), name: decision.name || `Evidence for ${record.number}`, description: decision.description, questions: decision.questions, type: decision.type || 'screenshot' };
+							plan.evidenceGoals.push(touchedEg);
+							touchedNames.push(`Created "${touchedEg.name}" (target not found)`);
+						} else {
+							if (decision.action === 'modify_and_link') {
+								target.name = decision.name || target.name;
+								target.description = decision.description || target.description;
+								target.questions = decision.questions.length > 0 ? decision.questions : target.questions;
+								target.type = decision.type || target.type;
+							}
+							if (!target.controlNumbers.includes(record.number)) target.controlNumbers.push(record.number);
+							touchedEg = target;
+							touchedNames.push(`${decision.action === 'link' ? 'Linked to' : 'Merged into'} "${touchedEg.name}"`);
+						}
+					}
+					void this.plugin.evidenceGoalIndex.upsert(touchedEg, session);
+				}
+
+				await this.plugin.saveSessionPlan(plan);
+				setStep(touchedNames.join('; ') || 'No evidence goal needed');
+
+				spinner.removeClass('auditor-spinner');
+				spinner.addClass('auditor-step-done');
+			} catch (e) {
+				setStep(`Failed: ${String(e)}`);
+				spinner.removeClass('auditor-spinner');
+				spinner.addClass('auditor-step-failed');
+			}
+		}
+
+		// Step 4: a final pass over the whole finished set, looking for further compression.
+		const compressRow = progressEl.createDiv('auditor-active-file-row');
+		const compressSpinner = compressRow.createDiv('auditor-spinner');
+		const compressLabel = compressRow.createSpan({ text: 'Compressing evidence goals…' });
+		try {
+			// `plan` already reflects every save from the loop above (mutated + persisted in place),
+			// so no need to re-read it from disk here.
+			if (plan.evidenceGoals.length > 1) {
+				const compression = await this.plugin.geminiGenerate.compressEvidenceGoals(
+					plan.evidenceGoals.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, questions: eg.questions, type: eg.type, controlNumbers: eg.controlNumbers })),
+				);
+				let mergedCount = 0;
+				for (const merge of compression.merges) {
+					const sources = plan.evidenceGoals.filter((eg) => merge.sourceIds.includes(eg.id));
+					if (sources.length < 2) continue;
+					const survivor = sources[0]!;
+					survivor.name = merge.name;
+					survivor.description = merge.description;
+					survivor.questions = merge.questions;
+					survivor.type = merge.type;
+					survivor.controlNumbers = [...new Set(sources.flatMap((eg) => eg.controlNumbers))];
+					const otherIds = new Set(sources.slice(1).map((eg) => eg.id));
+					plan.evidenceGoals = plan.evidenceGoals.filter((eg) => !otherIds.has(eg.id));
+					mergedCount += sources.length - 1;
+				}
+				if (mergedCount > 0) {
+					await this.plugin.saveSessionPlan(plan);
+					await this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.settings.interviewSessionPlansFolder);
+				}
+				compressLabel.setText(mergedCount > 0 ? `Compressed ${mergedCount} evidence goal(s) away.` : 'No further compression found.');
+			} else {
+				compressLabel.setText('Nothing to compress.');
+			}
+			compressSpinner.removeClass('auditor-spinner');
+			compressSpinner.addClass('auditor-step-done');
+		} catch (e) {
+			compressLabel.setText(`Compression failed: ${String(e)}`);
+			compressSpinner.removeClass('auditor-spinner');
+			compressSpinner.addClass('auditor-step-failed');
+		}
+
+		this.renderPrepareSessionResults(resultsEl, plan);
+		startBtn.disabled = false;
+	}
+
+	private renderPrepareSessionResults(resultsEl: HTMLElement, plan: InterviewSessionPlan): void {
+		resultsEl.empty();
+		resultsEl.createEl('h4', { text: `${plan.evidenceGoals.length} evidence goal(s) for "${plan.session}"` });
+		for (const eg of plan.evidenceGoals) {
+			const card = resultsEl.createDiv('auditor-eg-card');
+			card.createEl('strong', { text: eg.name || '(untitled)' });
+			card.createDiv({ cls: 'auditor-field-description', text: `Controls: ${eg.controlNumbers.join(', ')}` });
+			card.createDiv({ cls: 'auditor-eg-also-used-by', text: eg.description });
+		}
 	}
 
 	// ─── Chat tab ────────────────────────────────────────────────────────────
@@ -1337,10 +1985,16 @@ export class AuditorView extends ItemView {
 	private renderChatTab(container: HTMLElement): void {
 		const messagesEl = container.createDiv('auditor-chat-messages');
 		const inputRow = container.createDiv('auditor-chat-input-row');
-		const input = inputRow.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
+		const input = inputRow.createEl('textarea', {
+			cls: 'auditor-pipeline-textarea',
+		});
 		input.rows = 3;
-		input.placeholder = 'Ask anything about your standards, evidence, written controls, or interview evidence…';
-		const sendBtn = inputRow.createEl('button', { text: 'Send', cls: 'mod-cta' });
+		input.placeholder =
+			'Ask anything about your standards, evidence, written controls, or interview evidence…';
+		const sendBtn = inputRow.createEl('button', {
+			text: 'Send',
+			cls: 'mod-cta',
+		});
 
 		const send = () => {
 			const question = input.value.trim();
@@ -1363,45 +2017,77 @@ export class AuditorView extends ItemView {
 	private renderChatMessages(messagesEl: HTMLElement): void {
 		messagesEl.empty();
 		for (const message of this.chatMessages) {
-			const row = messagesEl.createDiv(`auditor-chat-message auditor-chat-message-${message.role}`);
+			const row = messagesEl.createDiv(
+				`auditor-chat-message auditor-chat-message-${message.role}`,
+			);
 			const textEl = row.createDiv('auditor-chat-message-text');
 			renderChatMarkdownInto(textEl, message.text);
 			if (message.sources && message.sources.length > 0) {
-				const sourcesEl = row.createEl('details', { cls: 'auditor-thinking' });
-				sourcesEl.createEl('summary', { text: `Sources (${message.sources.length})` });
+				const sourcesEl = row.createEl('details', {
+					cls: 'auditor-thinking',
+				});
+				sourcesEl.createEl('summary', {
+					text: `Sources (${message.sources.length})`,
+				});
 				const list = sourcesEl.createDiv('auditor-search-files-list');
 				for (const { result, kind } of message.sources) {
 					const item = list.createDiv('auditor-search-file-item');
 					this.createFileLink(item, result);
-					item.createSpan({ text: ` — ${SEARCH_STORE_LABELS[kind]}`, cls: 'auditor-control-number' });
+					item.createSpan({
+						text: ` — ${SEARCH_STORE_LABELS[kind]}`,
+						cls: 'auditor-control-number',
+					});
 				}
 			}
 		}
-		messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+		messagesEl.scrollTo({
+			top: messagesEl.scrollHeight,
+			behavior: 'smooth',
+		});
 	}
 
 	/** Searches every index with the same query and merges results by score, capped at CHAT_RETRIEVAL_TOP_K combined. */
-	private async retrieveChatContext(query: string): Promise<{ result: SearchResult; kind: StoreKind }[]> {
-		const kinds: StoreKind[] = ['standards', 'evidence', 'writtenControls', 'interviewEvidence'];
+	private async retrieveChatContext(
+		query: string,
+	): Promise<{ result: SearchResult; kind: StoreKind }[]> {
+		const kinds: StoreKind[] = [
+			'standards',
+			'evidence',
+			'writtenControls',
+			'interviewEvidence',
+		];
 		const perStore = await Promise.all(
-			kinds.map((kind) => this.plugin.storeFor(kind).search(query, CHAT_RETRIEVAL_TOP_K)),
+			kinds.map((kind) =>
+				this.plugin.storeFor(kind).search(query, CHAT_RETRIEVAL_TOP_K),
+			),
 		);
-		const combined = perStore.flatMap((results, i) => results.map((result) => ({ result, kind: kinds[i]! })));
+		const combined = perStore.flatMap((results, i) =>
+			results.map((result) => ({ result, kind: kinds[i]! })),
+		);
 		combined.sort((a, b) => b.result.score - a.result.score);
 		return combined.slice(0, CHAT_RETRIEVAL_TOP_K);
 	}
 
-	private async runChatTurn(question: string, messagesEl: HTMLElement, sendBtn: HTMLButtonElement): Promise<void> {
+	private async runChatTurn(
+		question: string,
+		messagesEl: HTMLElement,
+		sendBtn: HTMLButtonElement,
+	): Promise<void> {
 		this.chatMessages.push({ role: 'user', text: question });
 		this.renderChatMessages(messagesEl);
 
 		sendBtn.disabled = true;
 		const statusEl = this.showStatus(messagesEl, 'Planning search…');
 		try {
-			const history = this.chatMessages.slice(0, -1).map((m) => ({ role: m.role, text: m.text }));
+			const history = this.chatMessages
+				.slice(0, -1)
+				.map((m) => ({ role: m.role, text: m.text }));
 
 			// Step 1: decide whether/what to search for — a keyword-dense query, not just the raw message.
-			const plan = await this.plugin.geminiGenerate.planChatSearch(history, question);
+			const plan = await this.plugin.geminiGenerate.planChatSearch(
+				history,
+				question,
+			);
 
 			// Step 2: run the RAG search (if the plan calls for it) using that query.
 			let sources: { result: SearchResult; kind: StoreKind }[] = [];
@@ -1413,12 +2099,23 @@ export class AuditorView extends ItemView {
 			// Step 3: final answer, grounded in the compounded retrieved context.
 			statusEl.setText('Thinking…');
 			const contextText = sources
-				.map(({ result, kind }) => `[${SEARCH_STORE_LABELS[kind]} — ${sourceLabel(result)}]\n${result.text}`)
+				.map(
+					({ result, kind }) =>
+						`[${SEARCH_STORE_LABELS[kind]} — ${sourceLabel(result)}]\n${result.text}`,
+				)
 				.join('\n\n');
-			const answer = await this.plugin.geminiGenerate.chatWithRag(history, contextText, question);
+			const answer = await this.plugin.geminiGenerate.chatWithRag(
+				history,
+				contextText,
+				question,
+			);
 
 			statusEl.remove();
-			this.chatMessages.push({ role: 'assistant', text: answer, sources });
+			this.chatMessages.push({
+				role: 'assistant',
+				text: answer,
+				sources,
+			});
 			this.renderChatMessages(messagesEl);
 		} catch (e) {
 			statusEl.setText(`Failed: ${String(e)}`);
