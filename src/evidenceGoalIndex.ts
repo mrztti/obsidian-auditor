@@ -1,7 +1,7 @@
 import { LocalDocumentIndex, type EmbeddingsModel } from 'vectra/browser';
 import { LocalFileStorage } from 'vectra/node';
 import type { Vault } from 'obsidian';
-import { parseSessionPlanContent, type EvidenceGoal } from './evidenceGoal';
+import { parseEvidenceGoalFileContent, type EvidenceGoal } from './evidenceGoal';
 
 /**
  * Deliberately lightweight — just enough to identify the match. Callers (the "prepare session" flow)
@@ -24,7 +24,7 @@ function evidenceGoalText(eg: EvidenceGoal): string {
 /**
  * A vectra index over Evidence Goals, one vectra "document" per EG (unlike `AuditVectorStore`, which
  * chunks files into many documents) — an EG is already a small, atomic unit, so it's embedded and
- * retrieved as a whole. Indexed from every session plan note under the configured folder; since the
+ * retrieved as a whole. Indexed from every individual EG note under the `evidence-goals` subfolder; since the
  * total number of EGs in a vault is small, re-syncing is a full rebuild rather than the
  * hash-diffing/manifest machinery `AuditVectorStore` needs for large document folders.
  */
@@ -62,21 +62,21 @@ export class EvidenceGoalIndex {
 		return run;
 	}
 
-	/** Re-syncs the index against every EG currently in every session plan note under `folderPath`. */
-	async rebuildAll(vault: Vault, folderPath: string): Promise<void> {
+	/** Re-syncs the index against every EG note currently in `evidenceGoalsFolder` (one note per EG, named after its ID). */
+	async rebuildAll(vault: Vault, evidenceGoalsFolder: string): Promise<void> {
 		const idx = await this.getIndex();
-		const prefix = folderPath ? (folderPath.endsWith('/') ? folderPath : `${folderPath}/`) : '';
+		const prefix = evidenceGoalsFolder ? (evidenceGoalsFolder.endsWith('/') ? evidenceGoalsFolder : `${evidenceGoalsFolder}/`) : '';
 		const files = vault.getFiles().filter((f) => {
 			if (f.extension !== 'md') return false;
-			if (!folderPath) return true;
-			return f.path.startsWith(prefix) || f.path === folderPath;
+			if (!evidenceGoalsFolder) return true;
+			return f.path.startsWith(prefix) || f.path === evidenceGoalsFolder;
 		});
 
-		const current = new Map<string, { eg: EvidenceGoal; session: string }>();
+		const current = new Map<string, EvidenceGoal>();
 		for (const file of files) {
 			const content = await vault.cachedRead(file);
-			const plan = parseSessionPlanContent(content, file.basename);
-			for (const eg of plan.evidenceGoals) current.set(eg.id, { eg, session: plan.session });
+			const eg = parseEvidenceGoalFileContent(content, file.basename);
+			current.set(eg.id, eg);
 		}
 
 		await this.withLock(async () => {
@@ -86,9 +86,9 @@ export class EvidenceGoalIndex {
 			for (const uri of existingUris) {
 				if (!current.has(uri)) await idx.deleteDocument(uri);
 			}
-			for (const [id, { eg, session }] of current) {
+			for (const [id, eg] of current) {
 				await idx.upsertDocument(id, evidenceGoalText(eg), 'txt', {
-					session,
+					session: eg.session,
 					name: eg.name,
 					controlNumbers: eg.controlNumbers.join(','),
 				});
@@ -97,11 +97,11 @@ export class EvidenceGoalIndex {
 	}
 
 	/** Upserts a single EG — used right after it's created/modified, instead of a full rebuild. */
-	async upsert(eg: EvidenceGoal, session: string): Promise<void> {
+	async upsert(eg: EvidenceGoal): Promise<void> {
 		const idx = await this.getIndex();
 		await this.withLock(async () => {
 			await idx.upsertDocument(eg.id, evidenceGoalText(eg), 'txt', {
-				session,
+				session: eg.session,
 				name: eg.name,
 				controlNumbers: eg.controlNumbers.join(','),
 			});

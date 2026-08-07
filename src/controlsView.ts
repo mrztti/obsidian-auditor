@@ -1,4 +1,4 @@
-import { ItemView, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
+import { App, ItemView, Modal, TFile, WorkspaceLeaf, prepareFuzzySearch, setIcon } from 'obsidian';
 import type AuditorPlugin from './main';
 import {
 	buildControlNoteContent,
@@ -10,8 +10,38 @@ import {
 } from './controlNote';
 import { ImportControlsModal } from './importControlsModal';
 import { EvidenceGoalsModal } from './evidenceGoalsModal';
+import { ExportControlsModal } from './exportControlsModal';
 
 export const CONTROLS_VIEW_TYPE = 'auditor-controls-view';
+
+/** Confirms before an AI drafting button would overwrite an already-written conclusion — the pipelines run unattended and write straight to the file, so there's no other chance to catch this. */
+class ConfirmOverwriteModal extends Modal {
+	private message: string;
+	private onConfirm: () => void;
+
+	constructor(app: App, message: string, onConfirm: () => void) {
+		super(app);
+		this.message = message;
+		this.onConfirm = onConfirm;
+		this.setTitle('Overwrite existing conclusion?');
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('p', { text: this.message });
+		const actions = this.contentEl.createDiv('auditor-research-actions');
+		const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => { this.close(); });
+		const continueBtn = actions.createEl('button', { text: 'Overwrite', cls: 'mod-warning' });
+		continueBtn.addEventListener('click', () => {
+			this.onConfirm();
+			this.close();
+		});
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
 
 function ratingClass(rating: string): string {
 	if (rating === 'NC') return 'auditor-rating-nc';
@@ -61,10 +91,12 @@ interface ControlFilters {
 	statuses: Set<string>;
 	minRating: '' | 'C' | 'C*' | 'NC';
 	commentsOnly: boolean;
+	/** Fuzzy-matched against each control's `control` text (see `prepareFuzzySearch`) — applied and sorted by match score separately from the discrete filters below. */
+	searchQuery: string;
 }
 
 function emptyFilters(): ControlFilters {
-	return { sessions: new Set(), standards: new Set(), statuses: new Set(), minRating: '', commentsOnly: false };
+	return { sessions: new Set(), standards: new Set(), statuses: new Set(), minRating: '', commentsOnly: false, searchQuery: '' };
 }
 
 function matchesFilters(record: ControlRecord, filters: ControlFilters): boolean {
@@ -192,6 +224,9 @@ export class ControlsView extends ItemView {
 		const filterBar = container.createDiv('auditor-controls-filter-bar');
 		const filtersRow = filterBar.createDiv('auditor-controls-filters-row');
 
+		const searchInput = filtersRow.createEl('input', { type: 'text', cls: 'auditor-controls-search-input' });
+		searchInput.placeholder = 'Fuzzy search control text…';
+
 		const importBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Import controls' } });
 		setIcon(importBtn, 'file-up');
 		const refreshBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Refresh' } });
@@ -212,6 +247,7 @@ export class ControlsView extends ItemView {
 		const commentsOnlyCheckbox = commentsOnlyLabel.createEl('input', { type: 'checkbox' });
 		commentsOnlyLabel.createSpan({ text: 'Has comments' });
 		const clearBtn = filtersRow.createEl('button', { text: 'Clear filters' });
+		const exportBtn = filtersRow.createEl('button', { text: 'Export…' });
 		const status = filtersRow.createDiv('auditor-controls-count');
 
 		const scrollArea = container.createDiv('auditor-controls-scroll-area');
@@ -229,11 +265,25 @@ export class ControlsView extends ItemView {
 		resizeObserver.observe(grid);
 		this.register(() => resizeObserver.disconnect());
 
+		const currentlyFiltered = () => {
+			const base = allEntries.filter((e) => matchesFilters(e.record, filters));
+			const query = filters.searchQuery.trim();
+			if (!query) {
+				return base.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
+			}
+			// Fuzzy-match against control text specifically, sorted by match score (best first) —
+			// unlike every other filter here, this one reorders the list instead of just narrowing it.
+			const fuzzyMatch = prepareFuzzySearch(query);
+			return base
+				.map((e) => ({ entry: e, match: fuzzyMatch(e.record.control) }))
+				.filter((r): r is { entry: typeof base[number]; match: NonNullable<ReturnType<typeof fuzzyMatch>> } => r.match !== null)
+				.sort((a, b) => b.match.score - a.match.score)
+				.map((r) => r.entry);
+		};
+
 		const applyFilter = () => {
 			grid.empty();
-			const filtered = allEntries
-				.filter((e) => matchesFilters(e.record, filters))
-				.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
+			const filtered = currentlyFiltered();
 			status.setText(
 				filtered.length === allEntries.length
 					? `${allEntries.length} control(s).`
@@ -292,6 +342,12 @@ export class ControlsView extends ItemView {
 			statusFilter.refreshOptions();
 			minRatingSelect.value = '';
 			commentsOnlyCheckbox.checked = false;
+			filters.searchQuery = '';
+			searchInput.value = '';
+			applyFilter();
+		});
+		searchInput.addEventListener('input', () => {
+			filters.searchQuery = searchInput.value;
 			applyFilter();
 		});
 
@@ -302,6 +358,9 @@ export class ControlsView extends ItemView {
 			new ImportControlsModal(this.app, this.plugin, () => {
 				void load();
 			}).open();
+		});
+		exportBtn.addEventListener('click', () => {
+			new ExportControlsModal(this.app, this.plugin, currentlyFiltered()).open();
 		});
 		void load();
 	}
@@ -353,13 +412,15 @@ export class ControlsView extends ItemView {
 
 		const statusWrap = left.createDiv('auditor-field');
 		statusWrap.createEl('label', { text: 'Status', cls: 'auditor-field-label' });
-		const statusSelect = statusWrap.createEl('select');
+		const statusSelect = statusWrap.createEl('select', { cls: `auditor-status-select auditor-status-${statusSlug(entry.record.status)}` });
 		const statusOptions = CONTROL_STATUSES.includes(entry.record.status) ? CONTROL_STATUSES : [entry.record.status, ...CONTROL_STATUSES];
 		for (const opt of statusOptions) {
 			const optionEl = statusSelect.createEl('option', { text: opt || '(none)', value: opt });
 			if (opt === entry.record.status) optionEl.selected = true;
 		}
 		statusSelect.addEventListener('change', () => {
+			for (const opt of statusOptions) statusSelect.removeClass(`auditor-status-${statusSlug(opt)}`);
+			statusSelect.addClass(`auditor-status-${statusSlug(statusSelect.value)}`);
 			void this.persist(entry, { ...entry.record, status: statusSelect.value }, refresh);
 		});
 
@@ -371,6 +432,32 @@ export class ControlsView extends ItemView {
 		const egBtn = cardActions.createEl('button', { text: 'Evidence goals' });
 		egBtn.addEventListener('click', () => {
 			new EvidenceGoalsModal(this.app, this.plugin, entry.record).open();
+		});
+		const draftStage1Btn = cardActions.createEl('button', { text: 'Draft stage 1 (AI)' });
+		draftStage1Btn.addEventListener('click', () => {
+			const run = () => { void this.plugin.startStage1Draft(entry.file, entry.record); };
+			if (entry.record.todConclusion.trim()) {
+				new ConfirmOverwriteModal(
+					this.app,
+					`${entry.record.number || 'This control'} already has a Stage 1 conclusion. Running this will overwrite it once the draft is ready.`,
+					run,
+				).open();
+			} else {
+				run();
+			}
+		});
+		const draftStage2Btn = cardActions.createEl('button', { text: 'Draft stage 2 (AI)' });
+		draftStage2Btn.addEventListener('click', () => {
+			const run = () => { void this.plugin.startStage2Draft(entry.file, entry.record); };
+			if (entry.record.toeConclusion.trim()) {
+				new ConfirmOverwriteModal(
+					this.app,
+					`${entry.record.number || 'This control'} already has a Stage 2 conclusion. Running this will overwrite it once the draft is ready.`,
+					run,
+				).open();
+			} else {
+				run();
+			}
 		});
 
 		// ─── Middle column: full control text, never clamped ───────────────

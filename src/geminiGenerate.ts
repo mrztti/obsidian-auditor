@@ -377,6 +377,39 @@ const EVIDENCE_GOAL_COMPRESSION_SCHEMA: Schema = {
 	required: ['merges'],
 };
 
+export interface EvidenceGoalDomainGroup {
+	title: string;
+	evidenceGoalIds: string[];
+}
+
+export interface EvidenceGoalGroupingPlan {
+	thinking: string;
+	groups: EvidenceGoalDomainGroup[];
+}
+
+const EVIDENCE_GOAL_GROUPING_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		groups: {
+			type: Type.ARRAY,
+			description: 'Domain/topic groups (e.g. "Access Control", "Change Management", "Cryptography") that organize the session\'s evidence goals for the interview. Every evidence goal must appear in exactly one group.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					title: { type: Type.STRING, description: 'Short, specific domain/topic name for this group.' },
+					evidenceGoalIds: {
+						type: Type.ARRAY,
+						items: { type: Type.STRING },
+						description: 'IDs of the evidence goals that belong to this group.',
+					},
+				},
+				required: ['title', 'evidenceGoalIds'],
+			},
+		},
+	},
+	required: ['groups'],
+};
+
 const RERANK_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
@@ -1006,6 +1039,43 @@ export class GeminiGenerate {
 		].join('\n');
 
 		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalCompressionPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_COMPRESSION_SCHEMA);
+		return { thinking, ...parsed };
+	}
+
+	/**
+	 * "Prepare session" step 5 (and the session-plan view's "Regenerate groups" action): organizes a
+	 * session's finished Evidence Goals into domain/topic groups (e.g. "Access Control", "Change
+	 * Management") for the interview to walk through. Every EG must end up in exactly one group —
+	 * titles and membership are freely editable afterwards in the session-plan view, this just gives a
+	 * reasonable starting structure instead of one long flat list.
+	 */
+	async groupEvidenceGoalsByDomain(
+		evidenceGoals: { id: string; name: string; description: string; controlNumbers: string[] }[],
+	): Promise<EvidenceGoalGroupingPlan> {
+		const block = evidenceGoals
+			.map((eg) => [
+				`[${eg.id}] ${eg.name}`,
+				`Controls: ${eg.controlNumbers.join(', ')}`,
+				`Description: ${eg.description}`,
+			].join('\n'))
+			.join('\n\n');
+
+		const prompt = [
+			'You are organizing the finished list of Evidence Goals (EGs) for one audit interview session',
+			'into domain/topic groups, so the interview can walk through them one coherent topic at a',
+			'time instead of as one long flat list (e.g. "Access Control", "Change Management",',
+			'"Cryptography", "Physical Security"). Base the grouping on what the EG actually verifies, not',
+			'on which control(s) happen to cite it.',
+			'',
+			'Every evidence goal below must appear in exactly one group. Use as many groups as the actual',
+			'variety of topics warrants — don\'t force unrelated EGs into the same group just to reduce',
+			'the group count, and don\'t split closely related EGs into separate groups either.',
+			'',
+			'Evidence goals in this session:',
+			block,
+		].join('\n');
+
+		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalGroupingPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_GROUPING_SCHEMA);
 		return { thinking, ...parsed };
 	}
 }

@@ -72,9 +72,14 @@ export class EvidenceGoalsModal extends Modal {
 			return;
 		}
 
-		contentEl.createEl('p', {
+		const introRow = contentEl.createDiv();
+		introRow.createEl('p', {
 			text: `Session: ${this.plan.session}. Link this control to an existing evidence goal where possible, instead of creating a new one — the fewer evidence goals a session needs, the better.`,
 			cls: 'auditor-field-description',
+		});
+		const viewPlanBtn = introRow.createEl('button', { text: 'View full session plan' });
+		viewPlanBtn.addEventListener('click', () => {
+			void this.plugin.openSessionPlan(this.control.session);
 		});
 
 		const list = contentEl.createDiv('auditor-eg-list');
@@ -87,7 +92,7 @@ export class EvidenceGoalsModal extends Modal {
 		const addBtn = contentEl.createEl('button', { text: '+ New evidence goal for this control' });
 		addBtn.addEventListener('click', () => {
 			if (!this.plan) return;
-			const eg = emptyEvidenceGoal(this.control.number);
+			const eg = emptyEvidenceGoal(this.plan.session, this.control.number);
 			this.plan.evidenceGoals.push(eg);
 			this.markDirty();
 			this.render();
@@ -190,7 +195,7 @@ export class EvidenceGoalsModal extends Modal {
 				(eg) => eg.controlNumbers.length > 0 || eg.name.trim() || eg.description.trim(),
 			);
 			await this.plugin.saveSessionPlan(this.plan);
-			void this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.settings.interviewSessionPlansFolder);
+			void this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.evidenceGoalsSubfolder());
 			this.dirty = false;
 			this.statusEl.setText('Saved.');
 			this.onSaved();

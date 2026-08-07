@@ -5,7 +5,7 @@ export type ControlRating = '' | 'C' | 'C*' | 'NC' | '-';
 /** C = conform, C* = conform but with observation, NC = non-conform with recommendation, - = not applicable. */
 export const CONTROL_RATINGS: ControlRating[] = ['', 'C', 'C*', 'NC', '-'];
 
-export const CONTROL_STATUSES = ['To-Do', 'Needs Clarification', 'Problem', 'Draft', 'Done'];
+export const CONTROL_STATUSES = ['To-Do', 'Under Review', 'Problem', 'Draft', 'Done'];
 
 /** kebab-case CSS-safe slug for a status, used to look up its soft background colour. */
 export function statusSlug(status: string): string {

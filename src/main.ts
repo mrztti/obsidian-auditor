@@ -11,17 +11,27 @@ import { GeminiGenerate } from './geminiGenerate';
 import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
 import { ControlsView, CONTROLS_VIEW_TYPE } from './controlsView';
 import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
+import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
+import { SessionPlanPickerModal } from './sessionPlanPickerModal';
 import { FileExplorerDecorator } from './fileExplorerDecorator';
 import { AddControlModal } from './addControlModal';
 import { RateLimiter } from './rateLimiter';
 import { buildControlNoteContent, sanitizeFileTitle, type ControlRecord } from './controlNote';
 import {
-	buildSessionPlanContent,
-	emptySessionPlan,
-	parseSessionPlanContent,
+	buildEvidenceGoalFileContent,
+	buildSessionPlanRefContent,
+	parseEvidenceGoalFileContent,
+	parseSessionPlanRefContent,
 	sanitizeSessionFileName,
+	type EvidenceGoal,
 	type InterviewSessionPlan,
 } from './evidenceGoal';
+import {
+	buildEvidenceResultContent,
+	emptyEvidenceResult,
+	parseEvidenceResultContent,
+	type EvidenceResult,
+} from './evidenceResult';
 
 const log = (...args: unknown[]) => console.debug('[Auditor]', ...args);
 
@@ -123,6 +133,10 @@ export default class AuditorPlugin extends Plugin {
 			CONTROL_DETAIL_VIEW_TYPE,
 			(leaf) => new ControlDetailView(leaf, this),
 		);
+		this.registerView(
+			SESSION_PLAN_VIEW_TYPE,
+			(leaf) => new SessionPlanView(leaf, this),
+		);
 
 		this.addRibbonIcon('bot', 'Open auditor', () => {
 			void this.activateAuditorView();
@@ -138,6 +152,10 @@ export default class AuditorPlugin extends Plugin {
 			}).open();
 		});
 
+		this.addRibbonIcon('layout-list', 'Open session plan', () => {
+			new SessionPlanPickerModal(this.app, this).open();
+		});
+
 		this.addCommand({
 			id: 'open-auditor',
 			name: 'Open main view',
@@ -151,6 +169,14 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Open controls',
 			callback: () => {
 				void this.activateControlsView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-session-plan',
+			name: 'Open session plan',
+			callback: () => {
+				new SessionPlanPickerModal(this.app, this).open();
 			},
 		});
 
@@ -312,16 +338,44 @@ export default class AuditorPlugin extends Plugin {
 		}
 	}
 
-	async activateAuditorView(): Promise<void> {
+	async activateAuditorView(): Promise<AuditorView | null> {
 		const leaves = this.app.workspace.getLeavesOfType(AUDITOR_VIEW_TYPE);
 		const existing = leaves[0];
 		if (existing) {
 			void this.app.workspace.revealLeaf(existing);
-			return;
+			return existing.view instanceof AuditorView ? existing.view : null;
 		}
 		const leaf = this.app.workspace.getLeaf('tab');
 		await leaf.setViewState({ type: AUDITOR_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
+		return leaf.view instanceof AuditorView ? leaf.view : null;
+	}
+
+	/** Gets the Auditor view instance for running the pipeline in the background, creating a leaf for it if one doesn't already exist — but never revealing/focusing it, unlike `activateAuditorView` (used by the explicit "Open auditor" command/ribbon icon). */
+	private async getOrCreateAuditorView(): Promise<AuditorView | null> {
+		const leaves = this.app.workspace.getLeavesOfType(AUDITOR_VIEW_TYPE);
+		const existing = leaves[0];
+		if (existing) return existing.view instanceof AuditorView ? existing.view : null;
+		const leaf = this.app.workspace.getLeaf('tab');
+		await leaf.setViewState({ type: AUDITOR_VIEW_TYPE, active: false });
+		return leaf.view instanceof AuditorView ? leaf.view : null;
+	}
+
+	/**
+	 * Runs the control-drafting pipeline (in auto-mode) for an existing control in the background —
+	 * the Auditor view/tab is never revealed, so the user stays wherever they were (e.g. the Controls
+	 * view). Seeded from the control's own text; once the draft is ready, it's written straight back
+	 * into the control's file automatically, no further action needed.
+	 */
+	async startStage1Draft(file: TFile, record: ControlRecord): Promise<void> {
+		const view = await this.getOrCreateAuditorView();
+		view?.startPipelineForControl(file, record);
+	}
+
+	/** Runs the existing Stage 2 auto-drafting pipeline for an existing control in the background — same "don't reveal the Auditor tab" behavior as `startStage1Draft`. */
+	async startStage2Draft(file: TFile, record: ControlRecord): Promise<void> {
+		const view = await this.getOrCreateAuditorView();
+		void view?.draftStage2InBackground(file, record);
 	}
 
 	async activateControlsView(): Promise<void> {
@@ -348,6 +402,18 @@ export default class AuditorPlugin extends Plugin {
 		}
 		void this.app.workspace.revealLeaf(leaf);
 		if (leaf.view instanceof ControlDetailView) await leaf.view.setControl(file, record);
+	}
+
+	/** Opens (or reuses) the session-plan view as a main-area tab and points it at the given session. */
+	async openSessionPlan(session: string): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(SESSION_PLAN_VIEW_TYPE);
+		let leaf = leaves[0];
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf('tab');
+			await leaf.setViewState({ type: SESSION_PLAN_VIEW_TYPE, active: true });
+		}
+		void this.app.workspace.revealLeaf(leaf);
+		if (leaf.view instanceof SessionPlanView) await leaf.view.setSession(session);
 	}
 
 	/** Reloads every open Controls view (there's normally at most one) — called after a save from the control-detail view, since that save doesn't go through the Controls view's own UI. */
@@ -427,43 +493,164 @@ export default class AuditorPlugin extends Plugin {
 		return { written, failed };
 	}
 
-	/** The path a session's interview session plan note lives at — one note per session, named after it. */
+	/** The path a session's plan-reference note lives at — one note per session, named after it, holding just the ordered list of its EGs' IDs. */
 	sessionPlanPath(session: string): string {
 		const folder = this.settings.interviewSessionPlansFolder;
 		const safeName = sanitizeSessionFileName(session);
 		return normalizePath(folder ? `${folder}/${safeName}.md` : `${safeName}.md`);
 	}
 
-	/** Loads the session plan (its Evidence Goals) for a given session, or an empty one if no plan note exists yet. */
-	async loadSessionPlan(session: string): Promise<InterviewSessionPlan> {
-		const path = this.sessionPlanPath(session);
-		const file = this.app.vault.getAbstractFileByPath(path);
-		if (!(file instanceof TFile)) return emptySessionPlan(session);
-		const content = await this.app.vault.read(file);
-		return parseSessionPlanContent(content, session);
-	}
-
-	/** Writes a session plan back to its note, creating the note (and its folder) if it doesn't exist yet. */
-	async saveSessionPlan(plan: InterviewSessionPlan): Promise<void> {
-		const path = this.sessionPlanPath(plan.session);
-		const content = buildSessionPlanContent(plan);
-		const existing = this.app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile) {
-			await this.app.vault.modify(existing, content);
-			return;
-		}
+	/** Subfolder (under the session plans folder) that individual EG notes live in, one file per EG, named after its ID. */
+	evidenceGoalsSubfolder(): string {
 		const folder = this.settings.interviewSessionPlansFolder;
-		if (folder && !this.app.vault.getAbstractFileByPath(normalizePath(folder))) {
-			await this.app.vault.createFolder(normalizePath(folder));
-		}
-		await this.app.vault.create(path, content);
+		return normalizePath(folder ? `${folder}/evidence-goals` : 'evidence-goals');
 	}
 
-	/** Full re-sync of the evidence-goal index against every session plan note currently in the vault. */
+	evidenceGoalFilePath(id: string): string {
+		return normalizePath(`${this.evidenceGoalsSubfolder()}/${id}.md`);
+	}
+
+	/** Creates `path` and every missing parent segment along the way (`Vault.createFolder` isn't guaranteed to create intermediate directories on its own). */
+	private async ensureFolder(path: string): Promise<void> {
+		if (!path) return;
+		const segments = path.split('/').filter(Boolean);
+		let current = '';
+		for (const segment of segments) {
+			current = current ? `${current}/${segment}` : segment;
+			if (!this.app.vault.getAbstractFileByPath(current)) {
+				await this.app.vault.createFolder(current);
+			}
+		}
+	}
+
+	/** Loads a single EG note by ID, or null if it doesn't exist (e.g. the plan reference is stale). */
+	async loadEvidenceGoal(id: string): Promise<EvidenceGoal | null> {
+		const file = this.app.vault.getAbstractFileByPath(this.evidenceGoalFilePath(id));
+		if (!(file instanceof TFile)) return null;
+		const content = await this.app.vault.read(file);
+		return parseEvidenceGoalFileContent(content, id);
+	}
+
+	/** Loads a session's plan: reads its ordered list of EG IDs and domain groups, then loads each EG note in order (skipping any whose note is missing). */
+	async loadSessionPlan(session: string): Promise<InterviewSessionPlan> {
+		const file = this.app.vault.getAbstractFileByPath(this.sessionPlanPath(session));
+		if (!(file instanceof TFile)) return { session, evidenceGoals: [], groups: [] };
+		const content = await this.app.vault.read(file);
+		const { evidenceGoalIds, groups } = parseSessionPlanRefContent(content, session);
+		const evidenceGoals: EvidenceGoal[] = [];
+		for (const id of evidenceGoalIds) {
+			const eg = await this.loadEvidenceGoal(id);
+			if (eg) evidenceGoals.push(eg);
+		}
+		return { session, evidenceGoals, groups };
+	}
+
+	/**
+	 * Writes a session plan back out: every EG in `plan.evidenceGoals` gets its own note
+	 * created/updated, any EG note previously referenced by this session but no longer in
+	 * `plan.evidenceGoals` is deleted, and the plan-reference note is rewritten with the current
+	 * (possibly reordered) list of IDs.
+	 */
+	async saveSessionPlan(plan: InterviewSessionPlan): Promise<void> {
+		const refPath = this.sessionPlanPath(plan.session);
+		const existingRef = this.app.vault.getAbstractFileByPath(refPath);
+		const previousIds = existingRef instanceof TFile
+			? parseSessionPlanRefContent(await this.app.vault.read(existingRef), plan.session).evidenceGoalIds
+			: [];
+
+		// A group with no EGs left in it (all moved elsewhere/deleted) is just clutter — drop it.
+		const groupIdsInUse = new Set(plan.evidenceGoals.map((eg) => eg.groupId).filter(Boolean));
+		plan.groups = plan.groups.filter((g) => groupIdsInUse.has(g.id));
+
+		await this.ensureFolder(normalizePath(this.settings.interviewSessionPlansFolder));
+		await this.ensureFolder(this.evidenceGoalsSubfolder());
+
+		const currentIds = new Set(plan.evidenceGoals.map((eg) => eg.id));
+		for (const id of previousIds) {
+			if (currentIds.has(id)) continue;
+			const staleFile = this.app.vault.getAbstractFileByPath(this.evidenceGoalFilePath(id));
+			if (staleFile instanceof TFile) await this.app.fileManager.trashFile(staleFile);
+			void this.evidenceGoalIndex.remove(id);
+		}
+
+		for (const eg of plan.evidenceGoals) {
+			const path = this.evidenceGoalFilePath(eg.id);
+			const content = buildEvidenceGoalFileContent(eg);
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			if (existing instanceof TFile) await this.app.vault.modify(existing, content);
+			else await this.app.vault.create(path, content);
+		}
+
+		const refContent = buildSessionPlanRefContent(plan.session, plan.evidenceGoals.map((eg) => eg.id), plan.groups);
+		if (existingRef instanceof TFile) await this.app.vault.modify(existingRef, refContent);
+		else await this.app.vault.create(refPath, refContent);
+	}
+
+	/**
+	 * Evidence Results (ER) — the actual interview output (notes + pasted screenshots) captured
+	 * against one EG during a session run — live entirely separately from the EG notes themselves,
+	 * under their own subfolder, keyed only by the EG's ID. Nothing in the EG create/edit/save flow
+	 * above ever touches this subfolder, so regenerating, editing, or deleting EGs can never overwrite
+	 * or lose already-captured interview results.
+	 */
+	private evidenceResultsSubfolder(): string {
+		const folder = this.settings.interviewSessionPlansFolder;
+		return normalizePath(folder ? `${folder}/evidence-results` : 'evidence-results');
+	}
+
+	private evidenceResultFilePath(evidenceGoalId: string): string {
+		return normalizePath(`${this.evidenceResultsSubfolder()}/${evidenceGoalId}.md`);
+	}
+
+	private evidenceResultAttachmentsFolder(evidenceGoalId: string): string {
+		return normalizePath(`${this.evidenceResultsSubfolder()}/attachments/${evidenceGoalId}`);
+	}
+
+	async loadEvidenceResult(evidenceGoalId: string): Promise<EvidenceResult> {
+		const file = this.app.vault.getAbstractFileByPath(this.evidenceResultFilePath(evidenceGoalId));
+		if (!(file instanceof TFile)) return emptyEvidenceResult(evidenceGoalId);
+		const content = await this.app.vault.read(file);
+		return parseEvidenceResultContent(content, evidenceGoalId);
+	}
+
+	async saveEvidenceResult(result: EvidenceResult): Promise<void> {
+		await this.ensureFolder(this.evidenceResultsSubfolder());
+		const path = this.evidenceResultFilePath(result.evidenceGoalId);
+		const content = buildEvidenceResultContent(result);
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing instanceof TFile) await this.app.vault.modify(existing, content);
+		else await this.app.vault.create(path, content);
+	}
+
+	/** Saves a pasted screenshot as a real vault attachment (under the ER's own attachments subfolder, so filenames never collide across EGs) and returns the created file. */
+	async saveEvidenceScreenshot(evidenceGoalId: string, data: ArrayBuffer, extension: string): Promise<TFile> {
+		const folder = this.evidenceResultAttachmentsFolder(evidenceGoalId);
+		await this.ensureFolder(folder);
+		const filename = `screenshot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${extension}`;
+		const path = normalizePath(`${folder}/${filename}`);
+		return this.app.vault.createBinary(path, data);
+	}
+
+	/** Saves an exported PDF/Word document into `settings.exportsFolder` (vault root if unset), deriving a filename from `title` and adding a numeric suffix on collision instead of overwriting. */
+	async saveExportFile(title: string, extension: string, data: ArrayBuffer): Promise<TFile> {
+		const folder = this.settings.exportsFolder;
+		await this.ensureFolder(normalizePath(folder));
+		const base = sanitizeFileTitle(title || 'Export');
+		let safeName = base;
+		let suffix = 1;
+		let path = normalizePath(folder ? `${folder}/${safeName}.${extension}` : `${safeName}.${extension}`);
+		while (this.app.vault.getAbstractFileByPath(path)) {
+			safeName = `${base}-${++suffix}`;
+			path = normalizePath(folder ? `${folder}/${safeName}.${extension}` : `${safeName}.${extension}`);
+		}
+		return this.app.vault.createBinary(path, data);
+	}
+
+	/** Full re-sync of the evidence-goal index against every EG note currently in the vault. */
 	async reindexEvidenceGoals(): Promise<void> {
 		const notice = new Notice('Auditor: indexing evidence goals…', 0);
 		try {
-			await this.evidenceGoalIndex.rebuildAll(this.app.vault, this.settings.interviewSessionPlansFolder);
+			await this.evidenceGoalIndex.rebuildAll(this.app.vault, this.evidenceGoalsSubfolder());
 			notice.setMessage('Auditor: evidence goals indexed.');
 			window.setTimeout(() => notice.hide(), 3000);
 		} catch (e) {

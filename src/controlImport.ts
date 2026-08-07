@@ -11,7 +11,7 @@ export interface WorkbookPreview {
 	sampleRows: string[][];
 }
 
-function cellToString(value: unknown): string {
+export function cellToString(value: unknown): string {
 	if (value === null || value === undefined) return '';
 	if (value instanceof Date) return value.toISOString();
 	if (typeof value === 'string') return value;

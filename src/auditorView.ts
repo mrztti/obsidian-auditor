@@ -1,4 +1,4 @@
-import { ItemView, TFile, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 import type AuditorPlugin from './main';
 import type { StoreKind } from './main';
 import type {
@@ -18,6 +18,7 @@ import { renderControlRecordFields } from './controlFields';
 import { renderChatMarkdownInto } from './markdown';
 import {
 	emptyEvidenceGoal,
+	generateEvidenceGoalGroupId,
 	type EvidenceGoal,
 	type InterviewSessionPlan,
 } from './evidenceGoal';
@@ -78,9 +79,11 @@ interface PipelineState {
 	stepsPerformed: StepLogEntry[];
 }
 
+/** `seedRecord`, if given, is used as the starting point for `draftRecord` instead of a blank one — used when the pipeline is drafting Stage 1 for an already-existing control, so its number/standard/topic/session/status/comments/Stage 2 fields etc. all survive into the final save instead of being blanked out. */
 function emptyPipelineState(
 	controlInput: string,
 	defaultWritingRules: string,
+	seedRecord?: ControlRecord,
 ): PipelineState {
 	return {
 		controlInput,
@@ -99,7 +102,7 @@ function emptyPipelineState(
 		selectedFinalItems: new Set(),
 		writingRules: defaultWritingRules,
 		finalizationGuidance: '',
-		draftRecord: { ...emptyControlRecord(), control: controlInput },
+		draftRecord: { ...(seedRecord ?? emptyControlRecord()), control: controlInput },
 		stepsPerformed: [],
 	};
 }
@@ -226,6 +229,8 @@ export class AuditorView extends ItemView {
 	/** When on, each pipeline step advances to the next automatically (using default selections) instead of waiting for the user to click "Continue" — up to the final draft step. */
 	private autoMode = false;
 	private chatMessages: ChatMessage[] = [];
+	/** When set, the pipeline's final "Save" step updates this existing control's file (its Stage 1 fields only) instead of creating a new note — set by `startPipelineForControl`. */
+	private pipelineTargetFile: TFile | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: AuditorPlugin) {
 		super(leaf);
@@ -713,6 +718,25 @@ export class AuditorView extends ItemView {
 
 	// ─── Control-drafting pipeline tab ──────────────────────────────────────
 
+	/**
+	 * Entry point for drafting Stage 1 directly on an existing control (e.g. from the Controls view),
+	 * instead of starting the pipeline from scratch with free text. Seeds the pipeline from the
+	 * control's own text, runs it fully in auto-mode (RAG → analysis → research → finalize → draft,
+	 * no manual steps), and targets the control's own file for the final save — see
+	 * `pipelineTargetFile` and the save handler in `renderDraftStep`.
+	 */
+	startPipelineForControl(file: TFile, record: ControlRecord): void {
+		// Deliberately does NOT switch to the pipeline tab — this runs in the background (the Auditor
+		// view/leaf may not even be visible), so the pipeline steps still render into `pipelineEl`
+		// underneath, but nothing steals focus from wherever the user actually is.
+		this.pipelineTargetFile = file;
+		this.autoMode = true;
+		this.pipelineState = emptyPipelineState(record.control, this.plugin.settings.defaultWritingRules, record);
+		this.renderPipelineStart();
+		this.logStep(`Started Stage 1 draft for existing control ${record.number || '(no number)'}`);
+		void this.runStandardsAnalysis();
+	}
+
 	/** Step 1: free-text control/requirement input. */
 	private renderPipelineStart(): void {
 		this.pipelineEl.empty();
@@ -756,6 +780,7 @@ export class AuditorView extends ItemView {
 			cls: 'mod-cta',
 		});
 		startBtn.addEventListener('click', () => {
+			this.pipelineTargetFile = null;
 			this.pipelineState = emptyPipelineState(
 				input.value.trim(),
 				this.plugin.settings.defaultWritingRules,
@@ -1441,35 +1466,56 @@ export class AuditorView extends ItemView {
 			this.logStep('Drafted the control');
 			status.remove();
 			this.renderThinking(step, drafted.thinking);
-			this.renderDraftStep(step);
+			const statusEl = this.renderDraftStep(step);
 			this.scrollStepIntoView(step);
 			if (this.autoMode) this.playNotificationSound();
+			// Started from an existing control (see `startPipelineForControl`) — the whole point is to
+			// run unattended and land the result on the control with no further clicks needed.
+			if (this.pipelineTargetFile) void this.saveDraftToTargetFile(this.pipelineTargetFile, statusEl);
 		} catch (e) {
 			status.setText(`Draft failed: ${String(e)}`);
 		}
 	}
 
-	private renderDraftStep(step: HTMLElement): void {
+	/** Writes the current draft's Stage 1 fields into an existing control's file (used both by the "Save Stage 1 to ..." button and automatically when the pipeline was started from a control). */
+	private async saveDraftToTargetFile(targetFile: TFile, statusEl: HTMLElement): Promise<void> {
+		try {
+			statusEl.setText('Saving…');
+			await this.app.vault.modify(targetFile, buildControlNoteContent(this.pipelineState.draftRecord));
+			void this.plugin.runIndexing('writtenControls');
+			this.logStep(`Saved Stage 1 to ${this.pipelineState.draftRecord.number || targetFile.basename}`);
+			this.plugin.refreshControlsViews();
+			statusEl.setText('Saved.');
+		} catch (e) {
+			statusEl.setText(`Save failed: ${String(e)}`);
+		}
+	}
+
+	private renderDraftStep(step: HTMLElement): HTMLElement {
 		renderControlRecordFields(step, this.pipelineState.draftRecord);
 
+		const targetFile = this.pipelineTargetFile;
 		const saveBtn = step.createEl('button', {
-			text: 'Save as new note',
+			text: targetFile ? `Save Stage 1 to ${this.pipelineState.draftRecord.number || targetFile.basename}` : 'Save as new note',
 			cls: 'mod-cta',
 		});
 		const statusEl = step.createDiv();
 		saveBtn.addEventListener('click', () => {
 			void (async () => {
-				try {
-					await this.plugin.saveControlNote(
-						this.pipelineState.draftRecord,
-					);
-					this.logStep('Saved the draft as a new note');
-					statusEl.setText('Saved.');
-				} catch (e) {
-					statusEl.setText(`Save failed: ${String(e)}`);
+				if (targetFile) {
+					await this.saveDraftToTargetFile(targetFile, statusEl);
+				} else {
+					try {
+						await this.plugin.saveControlNote(this.pipelineState.draftRecord);
+						this.logStep('Saved the draft as a new note');
+						statusEl.setText('Saved.');
+					} catch (e) {
+						statusEl.setText(`Save failed: ${String(e)}`);
+					}
 				}
 			})();
 		});
+		return statusEl;
 	}
 
 	/** Read-only result list. */
@@ -1746,6 +1792,23 @@ export class AuditorView extends ItemView {
 		await this.app.vault.modify(file, buildControlNoteContent(updated));
 	}
 
+	/**
+	 * Entry point for drafting Stage 2 directly on an existing control in the background (e.g. from
+	 * the Controls view) — `runStage2Auto` is already fully headless (no UI rendering, just RAG +
+	 * draft + save), so this just runs it and refreshes/notifies once done, without needing to touch
+	 * any tab.
+	 */
+	async draftStage2InBackground(file: TFile, record: ControlRecord): Promise<void> {
+		try {
+			await this.runStage2Auto(file, record, () => {});
+			void this.plugin.runIndexing('writtenControls');
+			this.plugin.refreshControlsViews();
+			new Notice(`Auditor: drafted Stage 2 for ${record.number || file.basename}`);
+		} catch (e) {
+			new Notice(`Auditor: Stage 2 draft failed for ${record.number || file.basename} — ${String(e)}`);
+		}
+	}
+
 	// ─── Prepare session tab ────────────────────────────────────────────────
 
 	/**
@@ -1774,6 +1837,11 @@ export class AuditorView extends ItemView {
 		sessionSelect.createEl('option', { text: '— choose a session —', value: '' });
 		const startBtn = toolbar.createEl('button', { text: 'Prepare session', cls: 'mod-cta' });
 		startBtn.disabled = true;
+		const viewPlanBtn = toolbar.createEl('button', { text: 'View session plan' });
+		viewPlanBtn.disabled = true;
+		viewPlanBtn.addEventListener('click', () => {
+			if (sessionSelect.value) void this.plugin.openSessionPlan(sessionSelect.value);
+		});
 
 		const status = container.createDiv('auditor-status');
 		const progressEl = container.createDiv('auditor-stage2-progress');
@@ -1783,6 +1851,7 @@ export class AuditorView extends ItemView {
 
 		const updateStartEnabled = () => {
 			startBtn.disabled = !sessionSelect.value || !setupSelect.value;
+			viewPlanBtn.disabled = !sessionSelect.value;
 		};
 
 		const loadSessions = async () => {
@@ -1885,7 +1954,7 @@ export class AuditorView extends ItemView {
 				for (const decision of result.decisions) {
 					let touchedEg: EvidenceGoal;
 					if (decision.action === 'create') {
-						touchedEg = { ...emptyEvidenceGoal(record.number), name: decision.name, description: decision.description, questions: decision.questions, type: decision.type };
+						touchedEg = { ...emptyEvidenceGoal(session, record.number), name: decision.name, description: decision.description, questions: decision.questions, type: decision.type };
 						plan.evidenceGoals.push(touchedEg);
 						touchedNames.push(`Created "${touchedEg.name}"`);
 					} else {
@@ -1893,7 +1962,7 @@ export class AuditorView extends ItemView {
 						if (!target) {
 							// The model referenced an EG that isn't actually in the candidate set — fall back to
 							// creating a new one rather than silently dropping this piece of evidence.
-							touchedEg = { ...emptyEvidenceGoal(record.number), name: decision.name || `Evidence for ${record.number}`, description: decision.description, questions: decision.questions, type: decision.type || 'screenshot' };
+							touchedEg = { ...emptyEvidenceGoal(session, record.number), name: decision.name || `Evidence for ${record.number}`, description: decision.description, questions: decision.questions, type: decision.type || 'screenshot' };
 							plan.evidenceGoals.push(touchedEg);
 							touchedNames.push(`Created "${touchedEg.name}" (target not found)`);
 						} else {
@@ -1908,7 +1977,7 @@ export class AuditorView extends ItemView {
 							touchedNames.push(`${decision.action === 'link' ? 'Linked to' : 'Merged into'} "${touchedEg.name}"`);
 						}
 					}
-					void this.plugin.evidenceGoalIndex.upsert(touchedEg, session);
+					void this.plugin.evidenceGoalIndex.upsert(touchedEg);
 				}
 
 				await this.plugin.saveSessionPlan(plan);
@@ -1950,7 +2019,7 @@ export class AuditorView extends ItemView {
 				}
 				if (mergedCount > 0) {
 					await this.plugin.saveSessionPlan(plan);
-					await this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.settings.interviewSessionPlansFolder);
+					await this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.evidenceGoalsSubfolder());
 				}
 				compressLabel.setText(mergedCount > 0 ? `Compressed ${mergedCount} evidence goal(s) away.` : 'No further compression found.');
 			} else {
@@ -1964,18 +2033,68 @@ export class AuditorView extends ItemView {
 			compressSpinner.addClass('auditor-step-failed');
 		}
 
+		// Step 5: organize the finished EGs into domain/topic groups for the interview to walk through.
+		const groupRow = progressEl.createDiv('auditor-active-file-row');
+		const groupSpinner = groupRow.createDiv('auditor-spinner');
+		const groupLabel = groupRow.createSpan({ text: 'Grouping evidence goals by domain…' });
+		try {
+			if (plan.evidenceGoals.length > 0) {
+				await this.applyDomainGrouping(plan);
+				await this.plugin.saveSessionPlan(plan);
+				groupLabel.setText(`Organized into ${plan.groups.length} group(s).`);
+			} else {
+				groupLabel.setText('Nothing to group.');
+			}
+			groupSpinner.removeClass('auditor-spinner');
+			groupSpinner.addClass('auditor-step-done');
+		} catch (e) {
+			groupLabel.setText(`Grouping failed: ${String(e)}`);
+			groupSpinner.removeClass('auditor-spinner');
+			groupSpinner.addClass('auditor-step-failed');
+		}
+
 		this.renderPrepareSessionResults(resultsEl, plan);
 		startBtn.disabled = false;
+	}
+
+	/** Asks the LLM to sort every EG in `plan` into domain/topic groups, replacing whatever grouping it had before. Mutates `plan` in place; caller is responsible for persisting it. */
+	private async applyDomainGrouping(plan: InterviewSessionPlan): Promise<void> {
+		const grouping = await this.plugin.geminiGenerate.groupEvidenceGoalsByDomain(
+			plan.evidenceGoals.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, controlNumbers: eg.controlNumbers })),
+		);
+		const groups: { id: string; title: string }[] = [];
+		const assignedGroupId = new Map<string, string>();
+		for (const group of grouping.groups) {
+			if (group.evidenceGoalIds.length === 0) continue;
+			const groupId = generateEvidenceGoalGroupId();
+			groups.push({ id: groupId, title: group.title });
+			for (const egId of group.evidenceGoalIds) assignedGroupId.set(egId, groupId);
+		}
+		for (const eg of plan.evidenceGoals) eg.groupId = assignedGroupId.get(eg.id) ?? '';
+		plan.groups = groups;
 	}
 
 	private renderPrepareSessionResults(resultsEl: HTMLElement, plan: InterviewSessionPlan): void {
 		resultsEl.empty();
 		resultsEl.createEl('h4', { text: `${plan.evidenceGoals.length} evidence goal(s) for "${plan.session}"` });
-		for (const eg of plan.evidenceGoals) {
+		const renderEg = (eg: EvidenceGoal) => {
 			const card = resultsEl.createDiv('auditor-eg-card');
 			card.createEl('strong', { text: eg.name || '(untitled)' });
 			card.createDiv({ cls: 'auditor-field-description', text: `Controls: ${eg.controlNumbers.join(', ')}` });
 			card.createDiv({ cls: 'auditor-eg-also-used-by', text: eg.description });
+		};
+		if (plan.groups.length === 0) {
+			for (const eg of plan.evidenceGoals) renderEg(eg);
+			return;
+		}
+		for (const group of plan.groups) {
+			resultsEl.createEl('h5', { text: group.title });
+			for (const eg of plan.evidenceGoals.filter((e) => e.groupId === group.id)) renderEg(eg);
+		}
+		const ungrouped = plan.evidenceGoals.filter((eg) => !eg.groupId);
+		if (ungrouped.length > 0) {
+			resultsEl.createEl('h5', { text: 'Ungrouped' });
+			for (const eg of ungrouped) renderEg(eg);
 		}
 	}
 

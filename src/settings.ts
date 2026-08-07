@@ -14,8 +14,10 @@ export interface AuditorSettings {
 	writtenControlsFolder: string;
 	/** Vault folder containing interview evidence (Test of Effectiveness / Stage 2 evidence). */
 	interviewEvidenceFolder: string;
-	/** Vault folder where interview session plans (one note per session, listing its Evidence Goals) are stored. */
+	/** Vault folder where interview session plans live: one reference note per session (an ordered list of Evidence Goal IDs), plus an `evidence-goals` subfolder holding one note per Evidence Goal. */
 	interviewSessionPlansFolder: string;
+	/** Vault folder exported PDF/Word documents (controls, evidence) are saved into. Empty = vault root. */
+	exportsFolder: string;
 	maxResults: number;
 	/** Target paragraph-chunk size in words. */
 	chunkWords: number;
@@ -122,6 +124,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	writtenControlsFolder: '',
 	interviewEvidenceFolder: '',
 	interviewSessionPlansFolder: '',
+	exportsFolder: '',
 	maxResults: 10,
 	chunkWords: 300,
 	defaultWritingRules: DEFAULT_WRITING_RULES,
@@ -246,13 +249,27 @@ export class AuditorSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Interview session plans folder')
 			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Evidence Goals" names the plugin's own concept
-			.setDesc('Vault folder where interview session plans are stored — one note per session, listing its Evidence Goals.')
+			.setDesc('Vault folder where interview session plans are stored — one reference note per session, plus a subfolder with one note per Evidence Goal.')
 			.addText((text) =>
 				text
 					.setPlaceholder('Interview session plans')
 					.setValue(this.plugin.settings.interviewSessionPlansFolder)
 					.onChange(async (value) => {
 						this.plugin.settings.interviewSessionPlansFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Exports folder')
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "PDF" is a literal acronym
+			.setDesc('Vault folder exported PDF/Word documents are saved into. Leave empty to save at the vault root.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Exports')
+					.setValue(this.plugin.settings.exportsFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.exportsFolder = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);

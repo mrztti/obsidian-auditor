@@ -1,12 +1,15 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import * as mammoth from 'mammoth';
+import ExcelJS from 'exceljs';
 import { LocalDocumentIndex, type EmbeddingsModel } from 'vectra/browser';
 import { LocalFileStorage } from 'vectra/node';
 import { Vault, type TFile } from 'obsidian';
 import { chunkMarkdown, chunkPdfPages } from './chunker';
 import { CachingEmbeddings } from './embeddingsCache';
+import { cellToString } from './controlImport';
 
-const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf', 'docx']);
+const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf', 'docx', 'xlsx', 'xls']);
+const BINARY_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'xls']);
 
 // Injected at build time by esbuild.config.mjs: the full bundled source of
 // pdfjs-dist's worker, embedded as a string so it ships inside main.js itself
@@ -290,7 +293,7 @@ export class AuditVectorStore {
 		manifest: Manifest,
 		errors: ErrorMap,
 	): Promise<FileIndexStatus> {
-		const isBinary = file.extension === 'pdf' || file.extension === 'docx';
+		const isBinary = BINARY_EXTENSIONS.has(file.extension);
 		let rawContent: string;
 		try {
 			rawContent = isBinary
@@ -317,6 +320,10 @@ export class AuditVectorStore {
 				chunks = chunkPdfPages(await this.extractPdfPages(Buffer.from(rawContent, 'base64')), this.chunkWords);
 			} else if (file.extension === 'docx') {
 				chunks = chunkMarkdown(await this.extractDocxText(Buffer.from(rawContent, 'base64')), this.chunkWords);
+			} else if (file.extension === 'xlsx' || file.extension === 'xls') {
+				// Reuses chunkPdfPages: each worksheet stands in for a "page", so results still carry a
+				// sheet number (surfaced to the user as `page`) instead of a meaningless line number.
+				chunks = chunkPdfPages(await this.extractExcelSheets(Buffer.from(rawContent, 'base64')), this.chunkWords);
 			} else {
 				chunks = chunkMarkdown(rawContent, this.chunkWords);
 			}
@@ -391,6 +398,30 @@ export class AuditVectorStore {
 		const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 		const result = await mammoth.extractRawText({ arrayBuffer });
 		return result.value;
+	}
+
+	/**
+	 * One text block per worksheet, one row per line, cells pipe-separated, with a blank line between
+	 * rows — so `chunkPdfPages`' paragraph splitter treats each row as its own paragraph (merging
+	 * short consecutive rows up to `chunkWords`, same as it would markdown paragraphs), and evidence
+	 * kept as spreadsheets is just as searchable as a written note.
+	 */
+	private async extractExcelSheets(data: Buffer): Promise<string[]> {
+		const workbook = new ExcelJS.Workbook();
+		const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+		await workbook.xlsx.load(arrayBuffer);
+		return workbook.worksheets.map((sheet) => {
+			const lines: string[] = [];
+			sheet.eachRow({ includeEmpty: false }, (row) => {
+				const cells: string[] = [];
+				row.eachCell({ includeEmpty: false }, (cell) => {
+					const text = cellToString(cell.value).trim();
+					if (text) cells.push(text);
+				});
+				if (cells.length > 0) lines.push(cells.join(' | '));
+			});
+			return lines.join('\n\n');
+		});
 	}
 
 	/** Paths of all files currently represented in this store's manifest (used to decorate the file explorer). */
