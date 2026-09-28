@@ -1455,14 +1455,14 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
-	min-height: 200px;
-	max-height: 60vh;
+	min-height: 240px;
+	max-height: 68vh;
 	overflow-y: auto;
 	padding: 4px 2px;
 }
 
 .auditor-chat-message {
-	max-width: 85%;
+	max-width: 92%;
 	padding: 8px 12px;
 	border-radius: 10px;
 	background: var(--background-secondary);
@@ -1504,4 +1504,392 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 
 .auditor-chat-input-row textarea {
 	flex: 1;
+}
+
+/* ─── Agent chat ─────────────────────────────────────────────────────── */
+
+.auditor-chat-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.auditor-chat-toolbar-title {
+	font-weight: 600;
+	color: var(--text-muted);
+	font-size: 0.85em;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.auditor-chat-empty {
+	margin: auto;
+	max-width: 520px;
+	text-align: center;
+	padding: 24px 8px;
+}
+
+.auditor-chat-suggestions {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 12px;
+}
+
+.auditor-chat-suggestion {
+	text-align: left;
+	white-space: normal;
+	height: auto;
+	padding: 8px 12px;
+}
+
+.auditor-chat-message-note {
+	margin-top: 4px;
+	font-size: 0.75em;
+	opacity: 0.8;
+}
+
+.auditor-run {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	width: 92%;
+}
+
+.auditor-run-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--text-muted);
+	font-size: 0.85em;
+}
+
+.auditor-run-status {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.auditor-run-spinner,
+.auditor-activity-row.is-running .auditor-activity-icon,
+.auditor-plan-step.is-in_progress .auditor-plan-step-icon {
+	display: inline-flex;
+	animation: auditor-spin 1s linear infinite;
+}
+
+.auditor-run.is-finished .auditor-run-spinner {
+	display: none;
+}
+
+.auditor-run-header.is-error .auditor-run-status {
+	color: var(--text-error);
+}
+
+.auditor-run-error {
+	color: var(--text-error);
+	font-size: 0.9em;
+}
+
+@keyframes auditor-spin {
+	to { transform: rotate(360deg); }
+}
+
+.auditor-plan {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 10px 12px;
+	background: var(--background-primary);
+}
+
+.auditor-plan-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 600;
+}
+
+.auditor-plan-count {
+	color: var(--text-muted);
+	font-weight: 400;
+	font-size: 0.85em;
+}
+
+.auditor-plan-revised {
+	margin-left: auto;
+	font-size: 0.7em;
+	padding: 1px 6px;
+	border-radius: 8px;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	text-transform: uppercase;
+}
+
+.auditor-plan-objective {
+	margin: 4px 0 6px;
+	color: var(--text-muted);
+	font-size: 0.9em;
+}
+
+.auditor-plan-bar {
+	height: 3px;
+	border-radius: 2px;
+	background: var(--background-modifier-border);
+	overflow: hidden;
+	margin-bottom: 8px;
+}
+
+.auditor-plan-bar-fill {
+	height: 100%;
+	background: var(--interactive-accent);
+	transition: width 0.3s ease;
+}
+
+.auditor-plan-steps {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.auditor-plan-step {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	font-size: 0.92em;
+}
+
+.auditor-plan-step-icon,
+.auditor-activity-icon {
+	display: inline-flex;
+	flex-shrink: 0;
+	margin-top: 2px;
+}
+
+.auditor-plan-step-icon svg,
+.auditor-activity-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.auditor-plan-step.is-pending { color: var(--text-faint); }
+.auditor-plan-step.is-in_progress { color: var(--text-normal); font-weight: 600; }
+.auditor-plan-step.is-in_progress .auditor-plan-step-icon { color: var(--interactive-accent); }
+.auditor-plan-step.is-done .auditor-plan-step-icon { color: var(--color-green); }
+.auditor-plan-step.is-failed { color: var(--text-error); }
+.auditor-plan-step.is-failed .auditor-plan-step-icon { color: var(--text-error); }
+.auditor-plan-step.is-skipped { color: var(--text-faint); text-decoration: line-through; }
+.auditor-plan-step.is-new { animation: auditor-plan-flash 1.6s ease-out; }
+
+@keyframes auditor-plan-flash {
+	from { background: var(--background-modifier-hover); }
+	to { background: transparent; }
+}
+
+.auditor-activity-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	margin-top: 6px;
+	max-height: 220px;
+	overflow-y: auto;
+}
+
+.auditor-activity-row {
+	display: flex;
+	gap: 6px;
+	align-items: baseline;
+	font-size: 0.82em;
+	flex-wrap: wrap;
+}
+
+.auditor-activity-row.is-ok .auditor-activity-icon { color: var(--color-green); }
+.auditor-activity-row.is-failed .auditor-activity-icon { color: var(--text-error); }
+.auditor-activity-summary { color: var(--text-muted); }
+.auditor-activity-summary::before { content: '— '; }
+
+.auditor-activity-note {
+	font-size: 0.82em;
+	font-style: italic;
+	color: var(--text-muted);
+	padding-left: 20px;
+}
+
+/* Proposed changes / diffs */
+
+.auditor-proposal {
+	border: 1px solid var(--interactive-accent);
+	border-radius: 8px;
+	padding: 10px 12px;
+	background: var(--background-primary);
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.auditor-proposal-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 600;
+}
+
+.auditor-proposal-summary {
+	margin: 0;
+	color: var(--text-muted);
+	font-size: 0.9em;
+}
+
+.auditor-proposal-change {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 8px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.auditor-proposal-change-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.auditor-proposal-check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: 1;
+	min-width: 0;
+}
+
+.auditor-proposal-number { font-weight: 600; }
+.auditor-proposal-topic { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auditor-proposal-open { font-size: 0.8em; cursor: pointer; }
+
+.auditor-proposal-badge {
+	font-size: 0.72em;
+	padding: 1px 8px;
+	border-radius: 8px;
+}
+.auditor-proposal-badge.is-saved { background: var(--color-green); color: var(--text-on-accent); }
+.auditor-proposal-badge.is-failed { background: var(--text-error); color: var(--text-on-accent); }
+.auditor-proposal-badge.is-rejected { background: var(--background-modifier-border); color: var(--text-muted); }
+.auditor-proposal-error { color: var(--text-error); font-size: 0.85em; }
+
+.auditor-proposal-field-label {
+	font-size: 0.72em;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--text-muted);
+	margin-bottom: 2px;
+}
+
+.auditor-diff {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-size: 0.88em;
+	line-height: 1.5;
+	background: var(--background-secondary);
+	border-radius: 4px;
+	padding: 6px 8px;
+	max-height: 320px;
+	overflow-y: auto;
+}
+
+.auditor-diff-empty { color: var(--text-faint); }
+
+.auditor-diff-add {
+	background: rgba(var(--color-green-rgb), 0.25);
+	border-radius: 2px;
+}
+
+.auditor-diff-del {
+	background: rgba(var(--color-red-rgb), 0.25);
+	text-decoration: line-through;
+	border-radius: 2px;
+}
+
+.auditor-diff-line { display: block; }
+
+.auditor-proposal-footer {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.auditor-proposal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+/* Chat as a standalone sidebar view */
+
+.auditor-chat-view {
+	padding: 8px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	height: 100%;
+	overflow: hidden;
+}
+
+.auditor-chat-view .auditor-chat-messages {
+	flex: 1;
+	min-height: 0;
+	max-height: none;
+}
+
+.auditor-chat-view .auditor-chat-message,
+.auditor-chat-view .auditor-run {
+	max-width: 100%;
+	width: auto;
+}
+
+.auditor-chat-view .auditor-run {
+	align-self: stretch;
+}
+
+.auditor-chat-view .auditor-chat-input-row {
+	margin-top: 0;
+}
+
+/* Collapsed proposal: just the objects touched, their status and a link */
+
+.auditor-proposal-toggle {
+	margin-left: auto;
+	font-size: 0.8em;
+	font-weight: 400;
+	cursor: pointer;
+}
+
+.auditor-proposal.is-collapsed {
+	border-color: var(--background-modifier-border);
+	gap: 6px;
+	padding: 8px 12px;
+}
+
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-summary,
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-field,
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-topic {
+	display: none;
+}
+
+.auditor-proposal.is-collapsed .auditor-proposal-check input {
+	display: none;
+}
+
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-change {
+	border: none;
+	padding: 0;
+	gap: 0;
+}
+
+/* Generic hide for the agent chat UI (the tab-hidden class only styles tab containers) */
+
+.auditor-agent-hidden {
+	display: none !important;
 }

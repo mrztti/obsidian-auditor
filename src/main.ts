@@ -12,6 +12,7 @@ import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
 import { ControlsView, CONTROLS_VIEW_TYPE } from './controlsView';
 import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
 import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
+import { AgentChatView, AGENT_CHAT_VIEW_TYPE } from './agent/chatView';
 import { SessionPlanPickerModal } from './sessionPlanPickerModal';
 import { FileExplorerDecorator } from './fileExplorerDecorator';
 import { AddControlModal } from './addControlModal';
@@ -138,6 +139,15 @@ export default class AuditorPlugin extends Plugin {
 			(leaf) => new SessionPlanView(leaf, this),
 		);
 
+		this.registerView(
+			AGENT_CHAT_VIEW_TYPE,
+			(leaf) => new AgentChatView(leaf, this),
+		);
+
+		this.addRibbonIcon('message-square', 'Open auditor chat', () => {
+			void this.activateChatView();
+		});
+
 		this.addRibbonIcon('bot', 'Open auditor', () => {
 			void this.activateAuditorView();
 		});
@@ -161,6 +171,14 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Open main view',
 			callback: () => {
 				void this.activateAuditorView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-chat',
+			name: 'Open chat',
+			callback: () => {
+				void this.activateChatView();
 			},
 		});
 
@@ -378,6 +396,19 @@ export default class AuditorPlugin extends Plugin {
 		void view?.draftStage2InBackground(file, record);
 	}
 
+	/** Opens (or reveals) the agent chat in the right sidebar. */
+	async activateChatView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(AGENT_CHAT_VIEW_TYPE)[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: AGENT_CHAT_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
 	async activateControlsView(): Promise<void> {
 		const leaves = this.app.workspace.getLeavesOfType(CONTROLS_VIEW_TYPE);
 		const existing = leaves[0];
@@ -414,6 +445,13 @@ export default class AuditorPlugin extends Plugin {
 		}
 		void this.app.workspace.revealLeaf(leaf);
 		if (leaf.view instanceof SessionPlanView) await leaf.view.setSession(session);
+	}
+
+	/** Reloads open session-plan views showing `session` (unless they hold unsaved edits) — called after the agent saved changes to it. */
+	refreshSessionPlanViews(session: string): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(SESSION_PLAN_VIEW_TYPE)) {
+			if (leaf.view instanceof SessionPlanView) void leaf.view.reloadIfShowing(session);
+		}
 	}
 
 	/** Reloads every open Controls view (there's normally at most one) — called after a save from the control-detail view, since that save doesn't go through the Controls view's own UI. */

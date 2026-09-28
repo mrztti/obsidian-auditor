@@ -44,6 +44,11 @@ export class SessionPlanView extends ItemView {
 		this.plugin = plugin;
 	}
 
+	/** Re-reads the plan from disk when this view shows `session` and has no unsaved edits (in which case the user's edits win until they save or hit Refresh). */
+	async reloadIfShowing(session: string): Promise<void> {
+		if (this.session === session && !this.dirty) await this.setSession(session);
+	}
+
 	getViewType(): string {
 		return SESSION_PLAN_VIEW_TYPE;
 	}

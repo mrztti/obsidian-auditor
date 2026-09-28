@@ -435,6 +435,19 @@ export class AuditVectorStore {
 		return this.loadErrors();
 	}
 
+	/**
+	 * Full text of a vault file split into "pages" — PDF pages and worksheets each get one entry,
+	 * markdown/text/docx a single entry — for callers (the chat agent) that need to read a whole
+	 * document rather than retrieve chunks of it. Returns null for unsupported file types.
+	 */
+	async readPages(vault: Vault, file: TFile): Promise<string[] | null> {
+		if (!INDEXABLE_EXTENSIONS.has(file.extension) && file.extension !== 'txt') return null;
+		if (file.extension === 'pdf') return this.extractPdfPages(new Uint8Array(await vault.readBinary(file)));
+		if (file.extension === 'docx') return [await this.extractDocxText(Buffer.from(await vault.readBinary(file)))];
+		if (file.extension === 'xlsx' || file.extension === 'xls') return this.extractExcelSheets(Buffer.from(await vault.readBinary(file)));
+		return [await vault.cachedRead(file)];
+	}
+
 	async search(query: string, topK: number): Promise<SearchResult[]> {
 		const idx = await this.getIndex();
 		const results = await idx.queryDocuments(query, { maxDocuments: topK, maxChunks: topK });
