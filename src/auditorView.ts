@@ -23,6 +23,10 @@ import {
 } from './evidenceGoal';
 
 const GRAPH_WINDOW_SECONDS = 60;
+/** "Prepare session" batches this many controls into a single planning call per topic group — keeps large sessions (100+ controls) to a manageable number of LLM calls without losing the per-control detail the model sees. */
+const MAX_CONTROLS_PER_PLANNING_BATCH = 15;
+/** How many reference-report snippets to pull in per group for the final "what may have changed since last time" pass. */
+const REFERENCE_SNIPPETS_PER_GROUP = 6;
 
 export const AUDITOR_VIEW_TYPE = 'auditor-main-view';
 
@@ -1916,159 +1920,227 @@ export class AuditorView extends ItemView {
 
 		let plan: InterviewSessionPlan = await this.plugin.loadSessionPlan(session);
 
-		for (const { record } of targets) {
-			const row = progressEl.createDiv('auditor-active-file-row');
-			const spinner = row.createDiv('auditor-spinner');
-			const label = row.createSpan({ text: `${record.number}: Starting…` });
-			const setStep = (text: string) => { label.setText(`${record.number}: ${text}`); };
-
-			try {
-				const query = [record.control, record.todConclusion, record.toeConclusion].filter(Boolean).join('\n\n');
-
-				setStep('Searching standards…');
-				const standardsResults = await this.plugin.standardsIndex.search(query, this.plugin.settings.maxResults);
-				const standardsContext = standardsResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
-
-				setStep('Searching evidence…');
-				const evidenceResults = await this.plugin.evidenceIndex.search(query, this.plugin.settings.maxResults);
-				const evidenceContext = evidenceResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
-
-				setStep('Looking for similar evidence goals…');
-				const candidateMatches = await this.plugin.evidenceGoalIndex.search(query, 8, session);
-				const candidateIds = new Set(candidateMatches.map((m) => m.id));
-
-				setStep('Deciding…');
-				const controlContext = this.buildEgControlContext(record);
-				const candidates = plan.evidenceGoals
-					.filter((eg) => candidateIds.has(eg.id))
-					.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, questions: eg.questions, type: eg.type, controlNumbers: eg.controlNumbers }));
-				const result = await this.plugin.geminiGenerate.planEvidenceGoal(controlContext, standardsContext, setupContext, evidenceContext, candidates);
-
-				// A control can need more than one evidence goal (e.g. two distinct config screens) —
-				// apply every decision in turn, against the same in-progress plan, so later decisions in
-				// this same control still see EGs the earlier ones just touched.
-				const touchedNames: string[] = [];
-				for (const decision of result.decisions) {
-					let touchedEg: EvidenceGoal;
-					if (decision.action === 'create') {
-						touchedEg = { ...emptyEvidenceGoal(session, record.number), name: decision.name, description: decision.description, questions: decision.questions, type: decision.type };
-						plan.evidenceGoals.push(touchedEg);
-						touchedNames.push(`Created "${touchedEg.name}"`);
-					} else {
-						const target = plan.evidenceGoals.find((eg) => eg.id === decision.targetId);
-						if (!target) {
-							// The model referenced an EG that isn't actually in the candidate set — fall back to
-							// creating a new one rather than silently dropping this piece of evidence.
-							touchedEg = { ...emptyEvidenceGoal(session, record.number), name: decision.name || `Evidence for ${record.number}`, description: decision.description, questions: decision.questions, type: decision.type || 'screenshot' };
-							plan.evidenceGoals.push(touchedEg);
-							touchedNames.push(`Created "${touchedEg.name}" (target not found)`);
-						} else {
-							if (decision.action === 'modify_and_link') {
-								target.name = decision.name || target.name;
-								target.description = decision.description || target.description;
-								target.questions = decision.questions.length > 0 ? decision.questions : target.questions;
-								target.type = decision.type || target.type;
-							}
-							if (!target.controlNumbers.includes(record.number)) target.controlNumbers.push(record.number);
-							touchedEg = target;
-							touchedNames.push(`${decision.action === 'link' ? 'Linked to' : 'Merged into'} "${touchedEg.name}"`);
-						}
-					}
-					void this.plugin.evidenceGoalIndex.upsert(touchedEg);
-				}
-
-				await this.plugin.saveSessionPlan(plan);
-				setStep(touchedNames.join('; ') || 'No evidence goal needed');
-
-				spinner.removeClass('auditor-spinner');
-				spinner.addClass('auditor-step-done');
-			} catch (e) {
-				setStep(`Failed: ${String(e)}`);
-				spinner.removeClass('auditor-spinner');
-				spinner.addClass('auditor-step-failed');
-			}
-		}
-
-		// Step 4: a final pass over the whole finished set, looking for further compression.
-		const compressRow = progressEl.createDiv('auditor-active-file-row');
-		const compressSpinner = compressRow.createDiv('auditor-spinner');
-		const compressLabel = compressRow.createSpan({ text: 'Compressing evidence goals…' });
-		try {
-			// `plan` already reflects every save from the loop above (mutated + persisted in place),
-			// so no need to re-read it from disk here.
-			if (plan.evidenceGoals.length > 1) {
-				const compression = await this.plugin.geminiGenerate.compressEvidenceGoals(
-					plan.evidenceGoals.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, questions: eg.questions, type: eg.type, controlNumbers: eg.controlNumbers })),
-				);
-				let mergedCount = 0;
-				for (const merge of compression.merges) {
-					const sources = plan.evidenceGoals.filter((eg) => merge.sourceIds.includes(eg.id));
-					if (sources.length < 2) continue;
-					const survivor = sources[0]!;
-					survivor.name = merge.name;
-					survivor.description = merge.description;
-					survivor.questions = merge.questions;
-					survivor.type = merge.type;
-					survivor.controlNumbers = [...new Set(sources.flatMap((eg) => eg.controlNumbers))];
-					const otherIds = new Set(sources.slice(1).map((eg) => eg.id));
-					plan.evidenceGoals = plan.evidenceGoals.filter((eg) => !otherIds.has(eg.id));
-					mergedCount += sources.length - 1;
-				}
-				if (mergedCount > 0) {
-					await this.plugin.saveSessionPlan(plan);
-					await this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.evidenceGoalsSubfolder());
-				}
-				compressLabel.setText(mergedCount > 0 ? `Compressed ${mergedCount} evidence goal(s) away.` : 'No further compression found.');
-			} else {
-				compressLabel.setText('Nothing to compress.');
-			}
-			compressSpinner.removeClass('auditor-spinner');
-			compressSpinner.addClass('auditor-step-done');
-		} catch (e) {
-			compressLabel.setText(`Compression failed: ${String(e)}`);
-			compressSpinner.removeClass('auditor-spinner');
-			compressSpinner.addClass('auditor-step-failed');
-		}
-
-		// Step 5: organize the finished EGs into domain/topic groups for the interview to walk through.
+		// Step 0: organize every target control into domain/topic groups BEFORE any evidence goal is
+		// created. Every EG the loop below creates is scoped to one control's assigned group, so a
+		// "reuse an existing EG" decision only ever sees EGs about the same topic — the actual fix for
+		// controls that have nothing to do with each other getting crammed into one over-complicated
+		// EG, which naming things "as few EGs as possible" used to invite.
 		const groupRow = progressEl.createDiv('auditor-active-file-row');
 		const groupSpinner = groupRow.createDiv('auditor-spinner');
-		const groupLabel = groupRow.createSpan({ text: 'Grouping evidence goals by domain…' });
+		const groupLabel = groupRow.createSpan({ text: 'Organizing controls into groups…' });
+		const groupIdForControl = new Map<string, string>();
 		try {
-			if (plan.evidenceGoals.length > 0) {
-				await this.applyDomainGrouping(plan);
-				await this.plugin.saveSessionPlan(plan);
-				groupLabel.setText(`Organized into ${plan.groups.length} group(s).`);
-			} else {
-				groupLabel.setText('Nothing to group.');
+			const titleKey = (t: string) => t.trim().toLowerCase();
+			const groupByTitle = new Map(plan.groups.map((g) => [titleKey(g.title), g]));
+			const grouping = await this.plugin.geminiGenerate.assignControlGroups(
+				plan.groups.map((g) => g.title),
+				targets.map(({ record }) => ({ number: record.number, standard: record.standard, topic: record.topic, control: record.control })),
+			);
+			// Reuse an existing group by title (so re-running this on an already-grouped session
+			// doesn't fragment it into near-duplicate groups); only create genuinely new ones.
+			for (const title of grouping.groups) {
+				const key = titleKey(title);
+				if (groupByTitle.has(key)) continue;
+				const group = { id: generateEvidenceGoalGroupId(), title: title.trim() || 'Ungrouped' };
+				plan.groups.push(group);
+				groupByTitle.set(key, group);
 			}
+			for (const assignment of grouping.assignments) {
+				const group = groupByTitle.get(titleKey(assignment.groupTitle));
+				if (group) groupIdForControl.set(assignment.controlNumber, group.id);
+			}
+			// Deliberately not saved yet: saveSessionPlan drops any group with no evidence goal
+			// pointing at it (elsewhere, that's the right cleanup — e.g. after a user drags the last EG
+			// out of a group in the session-plan view). Here every group just created is, by design,
+			// still empty — its EGs come from the loop below — so saving now would immediately strip
+			// them straight back out. The groups stay in this in-memory `plan` and get persisted
+			// together with the first chunk of EGs that actually reference them.
+			groupLabel.setText(`Organized ${groupIdForControl.size} of ${targets.length} control(s) into ${new Set(groupIdForControl.values()).size} group(s).`);
 			groupSpinner.removeClass('auditor-spinner');
 			groupSpinner.addClass('auditor-step-done');
 		} catch (e) {
-			groupLabel.setText(`Grouping failed: ${String(e)}`);
+			// Not fatal: controls just fall back to ungrouped (groupIdForControl stays empty for them),
+			// same as the pipeline's old behavior before grouping existed at all.
+			groupLabel.setText(`Grouping failed: ${String(e)} — continuing ungrouped.`);
 			groupSpinner.removeClass('auditor-spinner');
 			groupSpinner.addClass('auditor-step-failed');
 		}
 
+		// Step 1: plan evidence goals in batches of up to MAX_CONTROLS_PER_PLANNING_BATCH controls,
+		// per group — not one call per control. With 100+ controls that's the difference between a few
+		// dozen LLM calls and a few hundred, and it's also higher quality: a batch sees every control
+		// in it together, so its create/link/modify decisions are consistent across the whole batch
+		// instead of an incremental one-at-a-time guess that can't see what's coming next.
+		const targetsByGroup = new Map<string, { file: TFile; record: ControlRecord }[]>();
+		for (const target of targets) {
+			const groupId = groupIdForControl.get(target.record.number) ?? '';
+			const bucket = targetsByGroup.get(groupId);
+			if (bucket) bucket.push(target);
+			else targetsByGroup.set(groupId, [target]);
+		}
+
+		for (const [groupId, groupTargets] of targetsByGroup) {
+			const groupTitle = plan.groups.find((g) => g.id === groupId)?.title || 'Ungrouped';
+			for (let offset = 0; offset < groupTargets.length; offset += MAX_CONTROLS_PER_PLANNING_BATCH) {
+				const chunk = groupTargets.slice(offset, offset + MAX_CONTROLS_PER_PLANNING_BATCH);
+				const chunkNumbers = new Set(chunk.map((t) => t.record.number));
+				const row = progressEl.createDiv('auditor-active-file-row');
+				const spinner = row.createDiv('auditor-spinner');
+				const label = row.createSpan({ text: `${groupTitle} (${chunk.length} control(s)): Gathering context…` });
+				const setStep = (text: string) => { label.setText(`${groupTitle} (${chunk.length} control(s)): ${text}`); };
+
+				try {
+					const controlsInput = await Promise.all(chunk.map(async ({ record }) => {
+						const query = [record.control, record.todConclusion, record.toeConclusion].filter(Boolean).join('\n\n');
+						const [standardsResults, evidenceResults] = await Promise.all([
+							this.plugin.standardsIndex.search(query, this.plugin.settings.maxResults),
+							this.plugin.evidenceIndex.search(query, this.plugin.settings.maxResults),
+						]);
+						return {
+							number: record.number,
+							context: this.buildEgControlContext(record),
+							standardsContext: standardsResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n'),
+							evidenceContext: evidenceResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n'),
+						};
+					}));
+
+					setStep('Deciding…');
+					// Candidates are scoped to this control's own group — never the whole session — so an
+					// evidence goal about an unrelated topic can never be offered as something to merge into.
+					const candidates = plan.evidenceGoals
+						.filter((eg) => eg.groupId === groupId)
+						.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, questions: eg.questions, type: eg.type, controlNumbers: eg.controlNumbers }));
+					const result = await this.plugin.geminiGenerate.planEvidenceGoalsForGroup(groupTitle, setupContext, controlsInput, candidates);
+
+					let created = 0;
+					let touched = 0;
+					const coveredNumbers = new Set<string>();
+					for (const decision of result.decisions) {
+						// Defensive: ignore/trim any control number outside this chunk (a model slip, not a real decision).
+						const controlNumbers = decision.controlNumbers.filter((n) => chunkNumbers.has(n));
+						if (controlNumbers.length === 0) continue;
+						for (const n of controlNumbers) coveredNumbers.add(n);
+
+						let touchedEg: EvidenceGoal;
+						if (decision.action === 'create') {
+							touchedEg = { ...emptyEvidenceGoal(session, controlNumbers[0]!), groupId, controlNumbers: [...controlNumbers], name: decision.name, description: decision.description, questions: decision.questions, type: decision.type };
+							plan.evidenceGoals.push(touchedEg);
+							created++;
+						} else {
+							const target = plan.evidenceGoals.find((eg) => eg.id === decision.targetId);
+							if (!target) {
+								// The model referenced an EG that isn't actually in the candidate set — fall back to
+								// creating a new one rather than silently dropping this piece of evidence.
+								touchedEg = { ...emptyEvidenceGoal(session, controlNumbers[0]!), groupId, controlNumbers: [...controlNumbers], name: decision.name || `Evidence for ${controlNumbers.join(', ')}`, description: decision.description, questions: decision.questions, type: decision.type || 'screenshot' };
+								plan.evidenceGoals.push(touchedEg);
+								created++;
+							} else {
+								if (decision.action === 'modify_and_link') {
+									target.name = decision.name || target.name;
+									target.description = decision.description || target.description;
+									target.questions = decision.questions.length > 0 ? decision.questions : target.questions;
+									target.type = decision.type || target.type;
+								}
+								for (const n of controlNumbers) if (!target.controlNumbers.includes(n)) target.controlNumbers.push(n);
+								touchedEg = target;
+							}
+						}
+						touched++;
+						void this.plugin.evidenceGoalIndex.upsert(touchedEg);
+					}
+
+					// Belt-and-suspenders: the schema can't force "every control must appear in some
+					// decision" — a control the model's response genuinely missed still gets a fallback EG
+					// rather than silently vanishing from the plan.
+					let fallbacks = 0;
+					for (const { record } of chunk) {
+						if (coveredNumbers.has(record.number)) continue;
+						const fallback: EvidenceGoal = { ...emptyEvidenceGoal(session, record.number), groupId, name: `Evidence for ${record.number}`, description: 'Auto-added: the planning step returned no decision for this control. Review and refine.' };
+						plan.evidenceGoals.push(fallback);
+						void this.plugin.evidenceGoalIndex.upsert(fallback);
+						fallbacks++;
+					}
+
+					await this.plugin.saveSessionPlan(plan);
+					setStep(`${touched} evidence goal(s) touched (${created} new)${fallbacks > 0 ? `, ${fallbacks} fallback(s) for uncovered controls` : ''}.`);
+					spinner.removeClass('auditor-spinner');
+					spinner.addClass('auditor-step-done');
+				} catch (e) {
+					setStep(`Failed: ${String(e)}`);
+					spinner.removeClass('auditor-spinner');
+					spinner.addClass('auditor-step-failed');
+				}
+			}
+		}
+
+		// Final step, once per group: a LIMITED merge-compression pass (never across groups, so it
+		// can't re-introduce the cross-topic merging the grouped pipeline above was built to avoid),
+		// combined with checking each group's evidence goals against a similar topic's reference
+		// reports — finalized reports from a past, closed engagement — for specific things worth
+		// re-verifying because they commonly drift over time. One call per group covers both, to keep
+		// this affordable for sessions with many groups.
+		const finalizeRow = progressEl.createDiv('auditor-active-file-row');
+		const finalizeSpinner = finalizeRow.createDiv('auditor-spinner');
+		const finalizeLabel = finalizeRow.createSpan({ text: 'Running quality control…' });
+		try {
+			// `plan` already reflects every save from the loop above (mutated + persisted in place),
+			// so no need to re-read it from disk here.
+			const buckets = [...plan.groups.map((g) => g.id), ''];
+			let mergedCount = 0;
+			let refinedCount = 0;
+			for (const bucketId of buckets) {
+				const bucket = plan.evidenceGoals.filter((eg) => eg.groupId === bucketId);
+				if (bucket.length === 0) continue;
+				const groupTitle = plan.groups.find((g) => g.id === bucketId)?.title || 'Ungrouped';
+				finalizeLabel.setText(`Quality control: "${groupTitle}"…`);
+
+				const referenceQuery = [groupTitle, ...bucket.slice(0, 3).map((eg) => eg.name)].filter(Boolean).join(' — ');
+				const referenceResults = await this.plugin.referenceReportsIndex.search(referenceQuery, REFERENCE_SNIPPETS_PER_GROUP).catch(() => []);
+				const referenceContext = referenceResults.map((r) => `[${sourceLabel(r)}]\n${r.text}`).join('\n\n');
+
+				const finalization = await this.plugin.geminiGenerate.finalizeEvidenceGoals(
+					groupTitle,
+					bucket.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, questions: eg.questions, type: eg.type, controlNumbers: eg.controlNumbers })),
+					referenceContext,
+				);
+				for (const entry of finalization.entries) {
+					const sources = plan.evidenceGoals.filter((eg) => entry.sourceIds.includes(eg.id));
+					if (sources.length === 0) continue;
+					const survivor = sources[0]!;
+					survivor.name = entry.name || survivor.name;
+					survivor.description = entry.description || survivor.description;
+					survivor.questions = entry.questions.length > 0 ? entry.questions : survivor.questions;
+					survivor.type = entry.type || survivor.type;
+					if (sources.length > 1) {
+						survivor.controlNumbers = [...new Set(sources.flatMap((eg) => eg.controlNumbers))];
+						const otherIds = new Set(sources.slice(1).map((eg) => eg.id));
+						plan.evidenceGoals = plan.evidenceGoals.filter((eg) => !otherIds.has(eg.id));
+						mergedCount += sources.length - 1;
+					} else {
+						refinedCount++;
+					}
+					void this.plugin.evidenceGoalIndex.upsert(survivor);
+				}
+			}
+			if (mergedCount > 0 || refinedCount > 0) {
+				await this.plugin.saveSessionPlan(plan);
+				if (mergedCount > 0) await this.plugin.evidenceGoalIndex.rebuildAll(this.app.vault, this.plugin.evidenceGoalsSubfolder());
+			}
+			finalizeLabel.setText(
+				mergedCount > 0 || refinedCount > 0
+					? `Compressed ${mergedCount} evidence goal(s) away, refined ${refinedCount} against reference reports.`
+					: 'No further compression or refinement found.',
+			);
+			finalizeSpinner.removeClass('auditor-spinner');
+			finalizeSpinner.addClass('auditor-step-done');
+		} catch (e) {
+			finalizeLabel.setText(`Quality control failed: ${String(e)}`);
+			finalizeSpinner.removeClass('auditor-spinner');
+			finalizeSpinner.addClass('auditor-step-failed');
+		}
+
 		this.renderPrepareSessionResults(resultsEl, plan);
 		startBtn.disabled = false;
-	}
-
-	/** Asks the LLM to sort every EG in `plan` into domain/topic groups, replacing whatever grouping it had before. Mutates `plan` in place; caller is responsible for persisting it. */
-	private async applyDomainGrouping(plan: InterviewSessionPlan): Promise<void> {
-		const grouping = await this.plugin.geminiGenerate.groupEvidenceGoalsByDomain(
-			plan.evidenceGoals.map((eg) => ({ id: eg.id, name: eg.name, description: eg.description, controlNumbers: eg.controlNumbers })),
-		);
-		const groups: { id: string; title: string }[] = [];
-		const assignedGroupId = new Map<string, string>();
-		for (const group of grouping.groups) {
-			if (group.evidenceGoalIds.length === 0) continue;
-			const groupId = generateEvidenceGoalGroupId();
-			groups.push({ id: groupId, title: group.title });
-			for (const egId of group.evidenceGoalIds) assignedGroupId.set(egId, groupId);
-		}
-		for (const eg of plan.evidenceGoals) eg.groupId = assignedGroupId.get(eg.id) ?? '';
-		plan.groups = groups;
 	}
 
 	private renderPrepareSessionResults(resultsEl: HTMLElement, plan: InterviewSessionPlan): void {

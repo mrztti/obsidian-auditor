@@ -1,6 +1,9 @@
+import { TFile } from 'obsidian';
 import type AuditorPlugin from '../main';
 import type { ControlStore } from './controlStore';
 import {
+	buildEvidenceGoalFileContent,
+	buildSessionPlanRefContent,
 	generateEvidenceGoalGroupId,
 	generateEvidenceGoalId,
 	type EvidenceGoal,
@@ -17,12 +20,33 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const strList = (v: unknown): string[] | null => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.trim()).filter(Boolean) : null);
 const int = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : null);
 
-/** The exact state used to detect that a plan changed between the agent reading it and the user approving edits. */
-const fingerprint = (plan: InterviewSessionPlan): string => JSON.stringify({ g: plan.groups, e: plan.evidenceGoals });
+/**
+ * A session plan is stored across multiple notes — one reference note plus one per evidence goal.
+ * Freshness used to be checked by re-loading and re-parsing the whole plan and diffing the result
+ * structurally, re-resolving every note's path via `getAbstractFileByPath` each time; that's fragile
+ * specifically because it's multi-file: a note this run just created via `vault.create()` can briefly
+ * lag Obsidian's own vault index, so re-resolving its path again moments later can spuriously return
+ * "not found" — making the next edit look like the plan changed underneath us, when nothing did.
+ *
+ * Instead, each relevant note's raw content AND its real `TFile` reference are snapshotted. A file we
+ * already hold a `TFile` for is re-read directly (`vault.read(file)`), never by re-resolving its path
+ * — that sidesteps the lag entirely for any note this run has touched. Only a note we've never
+ * resolved before (typically: the reference note, the very first time a session is edited) still goes
+ * through `getAbstractFileByPath`, which is fine — nothing THIS run wrote could be lagging yet.
+ * After a successful write, the snapshot is refreshed from the `TFile`s `saveSessionPlan` just
+ * returned and the content just computed/written in-memory, never by reading anything back off disk.
+ */
+interface PlanSnapshot {
+	plan: InterviewSessionPlan;
+	refFile: TFile | null;
+	refContent: string;
+	egFiles: Map<string, TFile>;
+	egContent: Map<string, string>;
+}
 
 /** Reads, edits (in memory), diffs and writes interview session plans on behalf of the agent. */
 export class SessionPlanStore {
-	private snapshots = new Map<string, InterviewSessionPlan>();
+	private snapshots = new Map<string, PlanSnapshot>();
 
 	constructor(private plugin: AuditorPlugin, private controls: ControlStore) {}
 
@@ -30,10 +54,23 @@ export class SessionPlanStore {
 		this.snapshots.clear();
 	}
 
-	/** Loads a plan and remembers it, so later edits are validated against — and checked for staleness against — what the agent saw. */
+	/** Loads a plan and remembers it — both its parsed shape (for edits/diffing) and each relevant note's `TFile` + raw content (for the freshness check) — so later edits are validated against what the agent actually saw. */
 	async read(session: string): Promise<InterviewSessionPlan> {
 		const plan = await this.plugin.loadSessionPlan(session);
-		this.snapshots.set(session, structuredClone(plan));
+		const refFile = this.plugin.app.vault.getAbstractFileByPath(this.plugin.sessionPlanPath(session));
+		const refContent = refFile instanceof TFile ? await this.plugin.app.vault.read(refFile) : '';
+		const egFiles = new Map<string, TFile>();
+		const egContent = new Map<string, string>();
+		for (const eg of plan.evidenceGoals) {
+			const file = this.plugin.app.vault.getAbstractFileByPath(this.plugin.evidenceGoalFilePath(eg.id));
+			if (file instanceof TFile) {
+				egFiles.set(eg.id, file);
+				egContent.set(eg.id, await this.plugin.app.vault.read(file));
+			} else {
+				egContent.set(eg.id, '');
+			}
+		}
+		this.snapshots.set(session, { plan: structuredClone(plan), refFile: refFile instanceof TFile ? refFile : null, refContent, egFiles, egContent });
 		return plan;
 	}
 
@@ -47,8 +84,9 @@ export class SessionPlanStore {
 	 * an error naming the failing operation so the model can correct it.
 	 */
 	async resolve(session: string, ops: PlanOp[]): Promise<{ error: string } | { after: InterviewSessionPlan; item: ReviewItem }> {
-		const before = this.snapshots.get(session);
-		if (!before) return { error: `Session plan "${session}" has not been read in this run — call get_session_plan first.` };
+		const snap = this.snapshots.get(session);
+		if (!snap) return { error: `Session plan "${session}" has not been read in this run — call get_session_plan first.` };
+		const before = snap.plan;
 		if (ops.length === 0) return { error: 'operations must be a non-empty array.' };
 
 		const validControls = new Set((await this.controls.listAll()).map((e) => e.record.number));
@@ -266,21 +304,50 @@ export class SessionPlanStore {
 		return entries;
 	}
 
-	/** Writes the edited plan, refusing if the saved plan is no longer what the agent read. */
+	/** Writes the edited plan, refusing if the saved plan is no longer what the agent read (see `PlanSnapshot` for why this re-checks via cached `TFile`s rather than re-resolving paths or re-parsing everything). */
 	async apply(session: string, after: InterviewSessionPlan): Promise<{ ok: true } | { ok: false; error: string }> {
-		const base = this.snapshots.get(session);
-		if (!base) return { ok: false, error: 'Plan was never read.' };
+		const snap = this.snapshots.get(session);
+		if (!snap) return { ok: false, error: 'Plan was never read.' };
 		try {
-			const current = await this.plugin.loadSessionPlan(session);
-			if (fingerprint(current) !== fingerprint(base)) {
+			// A known TFile is read directly; only a note this run has never resolved falls back to a
+			// path lookup, which is safe — nothing we ourselves just created could be lagging yet.
+			const currentRef = snap.refFile
+				? await this.plugin.app.vault.read(snap.refFile)
+				: await (async () => {
+					const file = this.plugin.app.vault.getAbstractFileByPath(this.plugin.sessionPlanPath(session));
+					return file instanceof TFile ? this.plugin.app.vault.read(file) : '';
+				})();
+			if (currentRef !== snap.refContent) {
 				return { ok: false, error: 'The session plan was edited after the agent read it — nothing was written. Ask the agent to try again.' };
 			}
-			await this.plugin.saveSessionPlan(after);
-			const previous = new Map(base.evidenceGoals.map((g) => [g.id, JSON.stringify(g)]));
-			for (const eg of after.evidenceGoals) {
-				if (previous.get(eg.id) !== JSON.stringify(eg)) void this.plugin.evidenceGoalIndex.upsert(eg);
+			for (const [id, content] of snap.egContent) {
+				const cached = snap.egFiles.get(id);
+				const current = cached
+					? await this.plugin.app.vault.read(cached)
+					: await (async () => {
+						const file = this.plugin.app.vault.getAbstractFileByPath(this.plugin.evidenceGoalFilePath(id));
+						return file instanceof TFile ? this.plugin.app.vault.read(file) : '';
+					})();
+				if (current !== content) {
+					return { ok: false, error: 'An evidence goal in this plan was edited after the agent read it — nothing was written. Ask the agent to try again.' };
+				}
 			}
-			this.snapshots.set(session, structuredClone(after));
+
+			const { refFile, egFiles } = await this.plugin.saveSessionPlan(after);
+
+			// Refresh the snapshot from the TFiles/content just written in-memory, not by reading
+			// anything back off disk — see `PlanSnapshot` for why that matters here.
+			const newEgContent = new Map(after.evidenceGoals.map((eg) => [eg.id, buildEvidenceGoalFileContent(eg)]));
+			for (const [id, content] of newEgContent) {
+				if (snap.egContent.get(id) !== content) void this.plugin.evidenceGoalIndex.upsert(after.evidenceGoals.find((eg) => eg.id === id)!);
+			}
+			this.snapshots.set(session, {
+				plan: structuredClone(after),
+				refFile,
+				refContent: buildSessionPlanRefContent(after.session, after.evidenceGoals.map((eg) => eg.id), after.groups),
+				egFiles,
+				egContent: newEgContent,
+			});
 			this.plugin.refreshSessionPlanViews(session);
 			return { ok: true };
 		} catch (e) {

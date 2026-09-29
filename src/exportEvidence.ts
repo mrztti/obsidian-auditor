@@ -107,8 +107,11 @@ export async function buildEvidencePdf(title: string, session: string, sections:
 			y = ensureSpace(doc, y, 40);
 			doc.setFont('helvetica', 'bold');
 			doc.setFontSize(12);
-			doc.text(eg.name || '(untitled)', PAGE_MARGIN, y);
-			y += 14;
+			for (const line of splitText(doc, eg.name || '(untitled)', CONTENT_WIDTH)) {
+				y = ensureSpace(doc, y, 14);
+				doc.text(line, PAGE_MARGIN, y);
+				y += 14;
+			}
 
 			doc.setFont('helvetica', 'normal');
 			doc.setFontSize(9);
@@ -123,6 +126,24 @@ export async function buildEvidencePdf(title: string, session: string, sections:
 					y = ensureSpace(doc, y, 12);
 					doc.text(line, PAGE_MARGIN, y);
 					y += 12;
+				}
+				y += 4;
+			}
+
+			if (eg.questions.length > 0) {
+				y = ensureSpace(doc, y, 14);
+				doc.setFont('helvetica', 'bold');
+				doc.setFontSize(9);
+				doc.text('Questions', PAGE_MARGIN, y);
+				y += 12;
+				doc.setFont('helvetica', 'normal');
+				doc.setFontSize(9.5);
+				for (const [i, question] of eg.questions.entries()) {
+					for (const line of splitText(doc, `${i + 1}. ${question}`, CONTENT_WIDTH)) {
+						y = ensureSpace(doc, y, 12);
+						doc.text(line, PAGE_MARGIN, y);
+						y += 12;
+					}
 				}
 				y += 4;
 			}
@@ -214,6 +235,12 @@ export async function buildEvidenceDocx(title: string, session: string, sections
 			}));
 			if (eg.description.trim()) {
 				children.push(new Paragraph({ text: eg.description, spacing: { after: 100 } }));
+			}
+			if (eg.questions.length > 0) {
+				children.push(new Paragraph({ text: 'Questions', heading: HeadingLevel.HEADING_4, spacing: { after: 40 } }));
+				for (const [i, question] of eg.questions.entries()) {
+					children.push(new Paragraph({ text: `${i + 1}. ${question}`, spacing: { after: 40 } }));
+				}
 			}
 			children.push(new Paragraph({ text: 'Notes', heading: HeadingLevel.HEADING_4, spacing: { after: 40 } }));
 			children.push(result.notes.trim()

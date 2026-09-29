@@ -612,7 +612,14 @@ export default class AuditorPlugin extends Plugin {
 	 * `plan.evidenceGoals` is deleted, and the plan-reference note is rewritten with the current
 	 * (possibly reordered) list of IDs.
 	 */
-	async saveSessionPlan(plan: InterviewSessionPlan): Promise<void> {
+	/**
+	 * Returns the TFile it just wrote for the reference note, and one per evidence-goal note, so a
+	 * caller that needs to re-check these exact notes afterward (`SessionPlanStore`'s freshness check)
+	 * can read them by direct TFile reference instead of re-resolving their paths — a just-created
+	 * file's path can briefly lag Obsidian's own vault index right after `vault.create()` resolves,
+	 * so a caller that has already been handed the real TFile shouldn't re-look-up its path at all.
+	 */
+	async saveSessionPlan(plan: InterviewSessionPlan): Promise<{ refFile: TFile; egFiles: Map<string, TFile> }> {
 		const refPath = this.sessionPlanPath(plan.session);
 		const existingRef = this.app.vault.getAbstractFileByPath(refPath);
 		const previousIds = existingRef instanceof TFile
@@ -634,17 +641,28 @@ export default class AuditorPlugin extends Plugin {
 			void this.evidenceGoalIndex.remove(id);
 		}
 
+		const egFiles = new Map<string, TFile>();
 		for (const eg of plan.evidenceGoals) {
 			const path = this.evidenceGoalFilePath(eg.id);
 			const content = buildEvidenceGoalFileContent(eg);
 			const existing = this.app.vault.getAbstractFileByPath(path);
-			if (existing instanceof TFile) await this.app.vault.modify(existing, content);
-			else await this.app.vault.create(path, content);
+			if (existing instanceof TFile) {
+				await this.app.vault.modify(existing, content);
+				egFiles.set(eg.id, existing);
+			} else {
+				egFiles.set(eg.id, await this.app.vault.create(path, content));
+			}
 		}
 
 		const refContent = buildSessionPlanRefContent(plan.session, plan.evidenceGoals.map((eg) => eg.id), plan.groups);
-		if (existingRef instanceof TFile) await this.app.vault.modify(existingRef, refContent);
-		else await this.app.vault.create(refPath, refContent);
+		let refFile: TFile;
+		if (existingRef instanceof TFile) {
+			await this.app.vault.modify(existingRef, refContent);
+			refFile = existingRef;
+		} else {
+			refFile = await this.app.vault.create(refPath, refContent);
+		}
+		return { refFile, egFiles };
 	}
 
 	/**

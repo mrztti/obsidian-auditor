@@ -282,10 +282,49 @@ const DRAFT_STAGE2_SCHEMA: Schema = {
 	required: ['toeConclusion', 'toeRating'],
 };
 
-export interface EvidenceGoalDecision {
+export interface ControlGroupAssignment {
+	controlNumber: string;
+	/** Exact title of a group in `groups` below (either an existing one reused, or one newly proposed). */
+	groupTitle: string;
+}
+
+export interface ControlGroupingPlan {
+	thinking: string;
+	/** The deduplicated, final set of group titles in use — existing ones reused plus any newly proposed. */
+	groups: string[];
+	assignments: ControlGroupAssignment[];
+}
+
+const CONTROL_GROUPING_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		groups: {
+			type: Type.ARRAY,
+			items: { type: Type.STRING },
+			description: 'The final, deduplicated set of domain/topic group titles in use (existing titles reused verbatim, plus any new ones proposed). Every title an assignment below uses must appear here.',
+		},
+		assignments: {
+			type: Type.ARRAY,
+			description: 'Exactly one entry per control given, assigning it to one of the group titles above.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					controlNumber: { type: Type.STRING, description: 'Exact control number, copied from the input.' },
+					groupTitle: { type: Type.STRING, description: 'The exact title (from `groups` above) this control belongs to.' },
+				},
+				required: ['controlNumber', 'groupTitle'],
+			},
+		},
+	},
+	required: ['groups', 'assignments'],
+};
+
+export interface GroupEvidenceGoalDecision {
 	action: 'create' | 'link' | 'modify_and_link';
 	/** Existing EG's ID, for "link"/"modify_and_link". Empty for "create". */
 	targetId: string;
+	/** Every control number (from this batch) this one decision covers — a decision covers more than one control only when they genuinely need the exact same screenshot/file. */
+	controlNumbers: string[];
 	/** New/replacement fields, for "create"/"modify_and_link". Empty/unused for "link". */
 	name: string;
 	description: string;
@@ -293,13 +332,13 @@ export interface EvidenceGoalDecision {
 	type: 'screenshot' | 'file';
 }
 
-export interface EvidenceGoalPlan {
+export interface GroupEvidenceGoalPlan {
 	thinking: string;
-	/** One control can need more than one screenshot/file — most controls need exactly one decision, but a control covering several distinct pieces of evidence (e.g. two different config screens) gets one decision per piece. */
-	decisions: EvidenceGoalDecision[];
+	/** Every control given must be covered by at least one decision's `controlNumbers`; a control needing several distinct pieces of evidence gets covered by several decisions. */
+	decisions: GroupEvidenceGoalDecision[];
 }
 
-const EVIDENCE_GOAL_DECISION_SCHEMA: Schema = {
+const GROUP_EVIDENCE_GOAL_DECISION_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
 		action: {
@@ -310,6 +349,11 @@ const EVIDENCE_GOAL_DECISION_SCHEMA: Schema = {
 		targetId: {
 			type: Type.STRING,
 			description: 'The existing EG\'s ID, for "link"/"modify_and_link". Empty string for "create".',
+		},
+		controlNumbers: {
+			type: Type.ARRAY,
+			items: { type: Type.STRING },
+			description: 'Every control (from this batch) this decision covers. Almost always one; more than one only when they genuinely need the exact same evidence.',
 		},
 		name: {
 			type: Type.STRING,
@@ -330,22 +374,23 @@ const EVIDENCE_GOAL_DECISION_SCHEMA: Schema = {
 			description: 'Almost always "screenshot"; "file" only when a screenshot genuinely cannot capture the evidence. Empty/ignored for "link".',
 		},
 	},
-	required: ['action', 'targetId', 'name', 'description', 'questions', 'type'],
+	required: ['action', 'targetId', 'controlNumbers', 'name', 'description', 'questions', 'type'],
 };
 
-const EVIDENCE_GOAL_PLAN_SCHEMA: Schema = {
+const GROUP_EVIDENCE_GOAL_PLAN_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
 		decisions: {
 			type: Type.ARRAY,
-			description: 'One decision per distinct piece of evidence this control needs. Most controls need exactly one; only add more when the control genuinely requires separate, distinct screenshots/files to be verified.',
-			items: EVIDENCE_GOAL_DECISION_SCHEMA,
+			description: 'Every decision needed to cover every control in this batch. Most controls need exactly one decision; only add more per control when it genuinely requires separate, distinct screenshots/files.',
+			items: GROUP_EVIDENCE_GOAL_DECISION_SCHEMA,
 		},
 	},
 	required: ['decisions'],
 };
 
-export interface EvidenceGoalCompressionMerge {
+export interface EvidenceGoalFinalizationEntry {
+	/** One id: refine that EG's questions/description in place. Two or more: merge them into one, with the fields below. */
 	sourceIds: string[];
 	name: string;
 	description: string;
@@ -353,17 +398,18 @@ export interface EvidenceGoalCompressionMerge {
 	type: 'screenshot' | 'file';
 }
 
-export interface EvidenceGoalCompressionPlan {
+export interface EvidenceGoalFinalizationPlan {
 	thinking: string;
-	merges: EvidenceGoalCompressionMerge[];
+	/** Only EGs actually being changed (merged and/or refined); anything not listed is left exactly as planned. */
+	entries: EvidenceGoalFinalizationEntry[];
 }
 
-const EVIDENCE_GOAL_COMPRESSION_SCHEMA: Schema = {
+const EVIDENCE_GOAL_FINALIZATION_SCHEMA: Schema = {
 	type: Type.OBJECT,
 	properties: {
-		merges: {
+		entries: {
 			type: Type.ARRAY,
-			description: 'Groups of 2+ evidence-goal IDs that should be merged into one. Omit EGs that should stay as-is.',
+			description: 'Only the evidence goals being changed — merged (2+ sourceIds) and/or refined in place (1 sourceId). Omit any EG that needs neither.',
 			items: {
 				type: Type.OBJECT,
 				properties: {
@@ -381,7 +427,7 @@ const EVIDENCE_GOAL_COMPRESSION_SCHEMA: Schema = {
 			},
 		},
 	},
-	required: ['merges'],
+	required: ['entries'],
 };
 
 export interface EvidenceGoalDomainGroup {
@@ -871,20 +917,67 @@ export class GeminiGenerate {
 	}
 
 	/**
-	 * "Prepare session" step 1: given a control's full context and the Evidence Goals (EGs) already
-	 * in its session that looked plausibly relevant (via RAG), decides whether to create a brand new
-	 * EG, link this control to an existing one as-is, or modify an existing one (broadening its name/
-	 * description/questions to also fit this control) and link it. The goal is to minimize the total
-	 * number of EGs a session needs — reuse/modify an existing EG whenever it's a reasonable fit
-	 * rather than creating a near-duplicate.
+	 * "Prepare session" step 0: given every control targeted by the session, organizes them into
+	 * domain/topic groups (e.g. "Access Control", "Change Management") BEFORE any Evidence Goal is
+	 * created — every EG created afterwards is scoped to one control's assigned group, so a later
+	 * "reuse an existing EG" decision only ever considers EGs about the same topic, never an unrelated
+	 * control that happens to rank nearby in a similarity search. Reuses an existing group whenever a
+	 * control genuinely fits it (so re-running this on a session that already has groups doesn't
+	 * fragment them); only proposes a new group when nothing existing fits.
 	 */
-	async planEvidenceGoal(
-		controlContext: string,
-		standardsContext: string,
+	async assignControlGroups(
+		existingGroupTitles: string[],
+		controls: { number: string; standard: string; topic: string; control: string }[],
+	): Promise<ControlGroupingPlan> {
+		const controlsBlock = controls
+			.map((c) => `[${c.number}] ${c.standard}${c.topic ? ` — ${c.topic}` : ''}\n${c.control}`)
+			.join('\n\n');
+
+		const prompt = [
+			'You are planning an audit interview session by first organizing its controls into',
+			'domain/topic groups (e.g. "Access Control", "Change Management", "Cryptography", "Physical',
+			'Security") — every piece of evidence needed for a control will later be planned inside its',
+			'assigned group, so put controls that will realistically need the SAME or overlapping',
+			'evidence (e.g. the same login/config screen) in the same group, and controls about genuinely',
+			'different topics in different groups.',
+			'',
+			'Reuse an existing group (exact title, verbatim) whenever a control genuinely fits it. Only',
+			'propose a new group when nothing existing is a reasonable fit. Use as many groups as the',
+			'actual variety of topics warrants — do not force unrelated controls into the same group just',
+			'to reduce the group count, and do not split closely related controls into separate groups',
+			'either.',
+			'',
+			existingGroupTitles.length > 0
+				? `Existing groups already in this session: ${existingGroupTitles.join(', ')}`
+				: '(no groups exist in this session yet)',
+			'',
+			'Controls to assign (number, standard, topic, control text):',
+			controlsBlock,
+		].join('\n');
+
+		const { thinking, parsed } = await this.generateStructured<Omit<ControlGroupingPlan, 'thinking'>>(prompt, CONTROL_GROUPING_SCHEMA);
+		return { thinking, ...parsed };
+	}
+
+	/**
+	 * "Prepare session" step 2: given EVERY control in one batch of a domain/topic group (from
+	 * `assignControlGroups` — never controls from other groups) at once, plus the EGs already in that
+	 * group, decides for each control whether it needs a brand new EG, an existing one as-is, or an
+	 * existing one broadened to also cover it. Batched rather than one call per control, both for cost
+	 * (large sessions can have 100+ controls) and for quality: seeing every control in the batch
+	 * together lets the model make consistent, coherent grouping decisions instead of an incremental
+	 * one-at-a-time guess that can't see what's coming next. Reuse an existing EG only when it
+	 * genuinely covers the same evidence — this is quality-first, not count-minimizing: forcing
+	 * unrelated controls to share one screenshot just to produce fewer EGs makes that EG's own
+	 * description/questions incoherent and overloaded, which is worse for the interview than two clean,
+	 * focused EGs.
+	 */
+	async planEvidenceGoalsForGroup(
+		groupTitle: string,
 		setupContext: string,
-		evidenceContext: string,
+		controls: { number: string; context: string; standardsContext: string; evidenceContext: string }[],
 		candidateEvidenceGoals: { id: string; name: string; description: string; questions: string[]; type: string; controlNumbers: string[] }[],
-	): Promise<EvidenceGoalPlan> {
+	): Promise<GroupEvidenceGoalPlan> {
 		const candidatesBlock = candidateEvidenceGoals.length > 0
 			? candidateEvidenceGoals
 				.map((eg) => [
@@ -894,74 +987,97 @@ export class GeminiGenerate {
 					eg.questions.length > 0 ? `Questions: ${eg.questions.join(' | ')}` : '',
 				].filter(Boolean).join('\n'))
 				.join('\n\n')
-			: '(no existing evidence goals found in this session yet)';
+			: '(no existing evidence goals found in this group yet)';
+
+		const controlsBlock = controls
+			.map((c) => [
+				`### Control ${c.number}`,
+				c.context,
+				'',
+				'Relevant supporting standards (context only):',
+				c.standardsContext || '(none)',
+				'',
+				'Relevant evidence already collected for this control (use to ground the EG in what has',
+				'actually been observed so far, not to replace the evidence goal itself):',
+				c.evidenceContext || '(none found)',
+			].join('\n'))
+			.join('\n\n');
 
 		const prompt = [
-			'You are planning an audit interview session. An "Evidence Goal" (EG) is a single screenshot',
-			'(or, rarely, file) an auditor needs to capture during the interview to verify a control is',
-			'conform in practice. The SAME EG can — and should, whenever reasonable — serve MULTIPLE',
-			'controls at once. The objective is to plan the session with as FEW evidence goals as',
-			'possible, so before creating a new one, always check whether an existing one already covers',
-			'this control, or could reasonably be broadened (a slightly more general name/description/',
-			'question set) to cover it too, without becoming vague or losing what it actually verifies.',
+			`You are planning the "${groupTitle}" part of an audit interview session, for the batch of`,
+			`${controls.length} control(s) below all at once. An "Evidence Goal" (EG) is a single`,
+			'screenshot (or, rarely, file) an auditor needs to capture during the interview to verify a',
+			'control is conform in practice. The SAME EG can cover multiple controls when — and only',
+			'when — they genuinely need the exact same screenshot/file (e.g. one config screen that',
+			'itself satisfies two related controls) — when several controls in this batch need the exact',
+			'same evidence, cover ALL of them with ONE decision by listing every one of them in that',
+			'decision\'s controlNumbers, rather than creating a separate new EG per control. Otherwise, for',
+			'each control, check whether an existing EG below already covers it as-is, or is a close',
+			'enough fit that broadening its name/description/questions slightly would cover it too WITHOUT',
+			'becoming vague, unfocused, or a grab-bag of unrelated requirements. When in doubt, prefer a',
+			'new, focused EG over stretching an existing one to fit — a session with a few more clean EGs',
+			'is better than one with fewer EGs that are each overloaded and hard to interview against.',
 			'',
-			'Most controls need exactly one evidence goal. Only produce more than one decision when the',
-			'control genuinely requires multiple distinct, separately-captured pieces of evidence (e.g. two',
-			'different configuration screens) — do not split a single piece of evidence into several',
-			'decisions just because the control text has several sentences.',
+			'Most controls need exactly one evidence goal. Only produce more than one decision for a',
+			'control when it genuinely requires multiple distinct, separately-captured pieces of evidence',
+			'(e.g. two different configuration screens) — do not split a single piece of evidence into',
+			'several decisions just because the control text has several sentences. EVERY control below',
+			'must be covered by at least one decision.',
 			'',
 			'For each decision, choose exactly one action:',
 			'- "link": an existing EG below already fully covers this piece of evidence as-is. Just',
-			'  attach this control to it — do not change its name/description/questions.',
-			'- "modify_and_link": an existing EG below is a close but not perfect fit. Broaden its name/',
-			'  description/questions just enough to also cover this control, then attach this control to',
-			'  it. The new fields REPLACE the EG\'s current ones — write them so they still make complete',
-			'  sense for every control the EG already covers, not just this one.',
-			'- "create": no existing EG is a reasonable fit. Define a new one.',
+			'  attach the control(s) to it — do not change its name/description/questions.',
+			'- "modify_and_link": an existing EG below is a close but not perfect fit. Broaden its',
+			'  name/description/questions just enough to also cover the control(s), then attach them. The',
+			'  new fields REPLACE the EG\'s current ones — write them so they still make complete sense for',
+			'  every control the EG covers, not just the new one(s).',
+			'- "create": no existing EG below is a reasonable fit. Define a new one, listing every control',
+			'  in this batch that it covers.',
 			'',
-			'For "link", set targetId to the existing EG\'s ID and leave name/description/questions empty.',
-			'For "modify_and_link", set targetId to the existing EG\'s ID and fill in the replacement',
-			'name/description/questions/type. For "create", leave targetId empty and fill in the new',
-			'EG\'s name/description/questions/type.',
+			'For "link"/"modify_and_link", set targetId to the existing EG\'s ID (from the list below —',
+			'never an EG you are creating in this same response; if several controls need the same new',
+			'evidence, that is one single "create" decision listing all of them, not several decisions',
+			'linked to each other). For "create", leave targetId empty and fill in the new EG\'s',
+			'name/description/questions/type. controlNumbers always lists every control this exact',
+			'decision covers.',
 			'',
 			'An EG\'s description should say exactly what should be captured and why it matters. Questions',
 			'are what the auditor should ask the interviewee to prompt them into showing/navigating to it.',
-			'Use the client\'s actual setup (below) and any existing evidence to ground the description and',
-			'questions in what is realistically there to find, rather than generic wording.',
-			'',
-			'Control (full context — standard, topic, control text, and any existing Stage 1/Stage 2',
-			'conclusions):',
-			controlContext,
-			'',
-			'Relevant supporting standards (context only):',
-			standardsContext || '(none)',
+			'Use the client\'s actual setup (below) and each control\'s existing evidence to ground',
+			'descriptions/questions in what is realistically there to find, rather than generic wording.',
 			'',
 			'The client\'s actual setup, to the best of our knowledge (ground truth for what evidence',
-			'realistically exists and where — use this to make descriptions/questions concrete):',
+			'realistically exists and where):',
 			setupContext || '(no setup description provided)',
 			'',
-			'Relevant evidence already collected for this control (use to ground the EG in what has',
-			'actually been observed so far, not to replace the evidence goal itself):',
-			evidenceContext || '(none found)',
-			'',
-			'Existing evidence goals already in this session:',
+			`Existing evidence goals already in the "${groupTitle}" group (the only ones eligible to link/modify — an EG from a different topic group is never a fit, even if it looks similar):`,
 			candidatesBlock,
+			'',
+			'Controls to plan for, this batch:',
+			controlsBlock,
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_PLAN_SCHEMA);
+		const { thinking, parsed } = await this.generateStructured<Omit<GroupEvidenceGoalPlan, 'thinking'>>(prompt, GROUP_EVIDENCE_GOAL_PLAN_SCHEMA);
 		return { thinking, ...parsed };
 	}
 
 	/**
-	 * "Prepare session" step 4: given every EG a session ended up with, looks for further compression
-	 * opportunities the incremental per-control planning above may have missed (e.g. two EGs created
-	 * early on, before either had seen the other, that turn out to overlap). Returns groups of 2+ EG
-	 * IDs to merge into one, with the merged EG's fields — never invents merges among EGs that don't
-	 * actually overlap.
+	 * "Prepare session" final pass, once per group: does TWO things in one call, to keep large
+	 * sessions (which can have many groups) cheap. (1) LIMITED further compression the batched
+	 * planning above may have missed — only pairs/groups of EGs that verify the literal same
+	 * screenshot/file, where merging loses nothing; deliberately conservative, since over-merging here
+	 * recreates the exact "one overloaded EG" problem grouping was meant to avoid. (2) Refines each
+	 * EG's questions against `referenceContext` — excerpts from finalized reports of a PAST, closed
+	 * engagement for a similar topic — to point the interview at what specifically might have changed
+	 * since then, e.g. "confirm whether the password policy is still 90 days, noted differently last
+	 * time" rather than a generic question. The past report is a prompt for what to re-verify, never a
+	 * source of the current answer — never phrase a question as if the old finding already still holds.
 	 */
-	async compressEvidenceGoals(
+	async finalizeEvidenceGoals(
+		groupTitle: string,
 		evidenceGoals: { id: string; name: string; description: string; questions: string[]; type: string; controlNumbers: string[] }[],
-	): Promise<EvidenceGoalCompressionPlan> {
+		referenceContext: string,
+	): Promise<EvidenceGoalFinalizationPlan> {
 		const block = evidenceGoals
 			.map((eg) => [
 				`[${eg.id}] ${eg.name} (${eg.type})`,
@@ -972,22 +1088,41 @@ export class GeminiGenerate {
 			.join('\n\n');
 
 		const prompt = [
-			'You are reviewing a finished list of Evidence Goals (EGs) planned for one audit interview',
-			'session, looking for further compression: pairs or groups of EGs that actually verify the',
-			'same screenshot/file, or are close enough that broadening one slightly would let it absorb',
-			'the other(s) without losing precision. Only propose a merge when it genuinely reduces',
-			'redundant screenshots the auditor would otherwise capture twice — do not merge EGs that',
-			'cover meaningfully different evidence just because they sound similar.',
+			`You are doing a final pass over the Evidence Goals (EGs) planned for the "${groupTitle}"`,
+			'topic group of an audit interview session, with two jobs:',
 			'',
-			'For each merge, list the EG IDs being merged (2 or more) and write the single replacement',
-			'EG (name/description/questions/type) that correctly covers every control all of the merged',
-			'EGs covered. EGs not mentioned in any merge are left as-is.',
+			'1) LIMITED further compression: only pairs/groups of EGs that verify the literal same',
+			'screenshot/file, where merging loses nothing. Only propose a merge when it genuinely',
+			'eliminates a redundant screenshot the auditor would otherwise capture twice for no reason —',
+			'do not merge EGs that cover meaningfully different evidence just because they sound similar',
+			'or share a control, and do not merge anything just to reduce the count. When unsure, leave',
+			'EGs separate; a slightly longer list of focused EGs is the correct, better outcome here, not',
+			'a failure to compress.',
 			'',
-			'Evidence goals in this session:',
+			'2) Sharpen each EG\'s questions using the excerpts below from a finalized report of a PAST,',
+			'CLOSED engagement on a similar topic. That old report is CLOSED and may be outdated — use it',
+			'only to spot SPECIFIC things worth re-checking because they were noted before and commonly',
+			'drift over time (a policy value, a named tool/vendor, a configuration setting, a named',
+			'owner/role). Turn that into a pointed question that asks the interviewee to confirm the',
+			'CURRENT state — e.g. "Confirm whether the session timeout is still 15 minutes, as noted',
+			'previously" — never state the old finding as still true, and never invent a specific detail',
+			'that isn\'t actually in the excerpts below. If nothing specific is worth flagging for an EG,',
+			'leave its questions as they are.',
+			'',
+			'Only include an entry for an EG you are actually changing (merging and/or refining its',
+			'questions/description); leave out anything unchanged. For a merge, list all its source IDs',
+			'and write the single replacement EG (name/description/questions/type) covering every control',
+			'the merged EGs covered — already incorporating any history-driven refinement from job 2. For',
+			'a refinement-only change, list just that one EG\'s ID with its complete updated fields.',
+			'',
+			'Evidence goals in this group:',
 			block,
+			'',
+			'Excerpts from a past, closed engagement\'s finalized report, on a similar topic (style/history reference only — see job 2 above):',
+			referenceContext || '(none found)',
 		].join('\n');
 
-		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalCompressionPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_COMPRESSION_SCHEMA);
+		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalFinalizationPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_FINALIZATION_SCHEMA);
 		return { thinking, ...parsed };
 	}
 
