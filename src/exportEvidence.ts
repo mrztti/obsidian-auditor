@@ -3,7 +3,8 @@ import { Document, Packer, Paragraph, TextRun, ImageRun, HeadingLevel, Alignment
 import type { TFile, Vault } from 'obsidian';
 import type { EvidenceGoal, InterviewSessionPlan } from './evidenceGoal';
 import type { EvidenceResult } from './evidenceResult';
-import { EXPORT_COLORS } from './exportColors';
+import { EXPORT_COLORS, readableTextOnHex } from './exportColors';
+import { drawPdfLogo, type PdfBranding } from './pdfBranding';
 
 export interface EvidenceExportItem {
 	evidenceGoal: EvidenceGoal;
@@ -74,12 +75,13 @@ function ensureSpace(doc: jsPDF, y: number, needed: number): number {
 	return y;
 }
 
-export async function buildEvidencePdf(title: string, session: string, sections: { title: string; items: EvidenceExportItem[] }[], vault: Vault): Promise<jsPDF> {
+export async function buildEvidencePdf(title: string, session: string, sections: { title: string; items: EvidenceExportItem[] }[], vault: Vault, branding: PdfBranding): Promise<jsPDF> {
 	const doc = new jsPDF({ unit: 'pt', format: 'a4' });
 
-	doc.setFillColor(EXPORT_COLORS.accent);
+	doc.setFillColor(branding.accentHex);
 	doc.rect(0, 0, PAGE_WIDTH, 180, 'F');
-	doc.setTextColor(EXPORT_COLORS.white);
+	drawPdfLogo(doc, branding.logo, PAGE_MARGIN, 18, 110, 48);
+	doc.setTextColor(readableTextOnHex(branding.accentHex));
 	doc.setFont('helvetica', 'bold');
 	doc.setFontSize(28);
 	doc.text(splitText(doc, title, CONTENT_WIDTH), PAGE_MARGIN, 100);
@@ -95,7 +97,7 @@ export async function buildEvidencePdf(title: string, session: string, sections:
 		y = ensureSpace(doc, y, 30);
 		doc.setFont('helvetica', 'bold');
 		doc.setFontSize(16);
-		doc.setTextColor(EXPORT_COLORS.accent);
+		doc.setTextColor(branding.accentHex);
 		doc.text(section.title, PAGE_MARGIN, y);
 		doc.setTextColor(EXPORT_COLORS.textDark);
 		y += 24;

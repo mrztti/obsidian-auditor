@@ -13,6 +13,7 @@ import { ControlsView, CONTROLS_VIEW_TYPE } from './controlsView';
 import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
 import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
 import { AgentChatView, AGENT_CHAT_VIEW_TYPE } from './agent/chatView';
+import { DraftQueue } from './agent/draftQueue';
 import { SessionPlanPickerModal } from './sessionPlanPickerModal';
 import { FileExplorerDecorator } from './fileExplorerDecorator';
 import { AddControlModal } from './addControlModal';
@@ -36,7 +37,7 @@ import {
 
 const log = (...args: unknown[]) => console.debug('[Auditor]', ...args);
 
-export type StoreKind = 'standards' | 'evidence' | 'writtenControls' | 'interviewEvidence';
+export type StoreKind = 'standards' | 'evidence' | 'writtenControls' | 'interviewEvidence' | 'referenceReports';
 
 export default class AuditorPlugin extends Plugin {
 	settings!: AuditorSettings;
@@ -44,10 +45,13 @@ export default class AuditorPlugin extends Plugin {
 	evidenceIndex!: AuditVectorStore;
 	writtenControlsIndex!: AuditVectorStore;
 	interviewEvidenceIndex!: AuditVectorStore;
+	referenceReportsIndex!: AuditVectorStore;
 	evidenceGoalIndex!: EvidenceGoalIndex;
 	geminiGenerate!: GeminiGenerate;
 	fileExplorerDecorator!: FileExplorerDecorator;
 	rateLimiter!: RateLimiter;
+	/** Drafting targets queued from the Controls view, reviewed and launched from the chat panel's queue drawer. */
+	draftQueue = new DraftQueue();
 
 	async onload() {
 		log('onload: plugin loading');
@@ -89,6 +93,12 @@ export default class AuditorPlugin extends Plugin {
 		this.interviewEvidenceIndex = new AuditVectorStore(
 			embeddings,
 			`${dataRoot}/vector-index/interview-evidence`,
+			this.settings.chunkWords,
+			this.settings.maxConcurrentIndexing,
+		);
+		this.referenceReportsIndex = new AuditVectorStore(
+			embeddings,
+			`${dataRoot}/vector-index/reference-reports`,
 			this.settings.chunkWords,
 			this.settings.maxConcurrentIndexing,
 		);
@@ -241,6 +251,14 @@ export default class AuditorPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'reindex-reference-reports',
+			name: 'Re-index reference reports',
+			callback: () => {
+				void this.runIndexing('referenceReports');
+			},
+		});
+
+		this.addCommand({
 			id: 'reindex-evidence-goals',
 			name: 'Re-index evidence goals',
 			callback: () => {
@@ -271,12 +289,13 @@ export default class AuditorPlugin extends Plugin {
 		if (kind === 'standards') return this.standardsIndex;
 		if (kind === 'evidence') return this.evidenceIndex;
 		if (kind === 'interviewEvidence') return this.interviewEvidenceIndex;
+		if (kind === 'referenceReports') return this.referenceReportsIndex;
 		return this.writtenControlsIndex;
 	}
 
 	/** Applies the current `maxConcurrentIndexing` setting to all stores; called whenever the setting changes. */
 	updateIndexingConcurrency(): void {
-		for (const kind of ['standards', 'evidence', 'writtenControls', 'interviewEvidence'] as StoreKind[]) {
+		for (const kind of ['standards', 'evidence', 'writtenControls', 'interviewEvidence', 'referenceReports'] as StoreKind[]) {
 			this.storeFor(kind).setMaxConcurrentFiles(this.settings.maxConcurrentIndexing);
 		}
 	}
@@ -285,6 +304,7 @@ export default class AuditorPlugin extends Plugin {
 		if (kind === 'standards') return this.settings.standardsFolder;
 		if (kind === 'evidence') return this.settings.evidenceFolder;
 		if (kind === 'interviewEvidence') return this.settings.interviewEvidenceFolder;
+		if (kind === 'referenceReports') return this.settings.referenceReportsFolder;
 		return this.settings.writtenControlsFolder;
 	}
 
@@ -292,6 +312,7 @@ export default class AuditorPlugin extends Plugin {
 		if (kind === 'standards') return 'Standards';
 		if (kind === 'evidence') return 'Evidence';
 		if (kind === 'interviewEvidence') return 'Interview evidence';
+		if (kind === 'referenceReports') return 'Reference reports';
 		return 'Written controls';
 	}
 
@@ -369,33 +390,6 @@ export default class AuditorPlugin extends Plugin {
 		return leaf.view instanceof AuditorView ? leaf.view : null;
 	}
 
-	/** Gets the Auditor view instance for running the pipeline in the background, creating a leaf for it if one doesn't already exist — but never revealing/focusing it, unlike `activateAuditorView` (used by the explicit "Open auditor" command/ribbon icon). */
-	private async getOrCreateAuditorView(): Promise<AuditorView | null> {
-		const leaves = this.app.workspace.getLeavesOfType(AUDITOR_VIEW_TYPE);
-		const existing = leaves[0];
-		if (existing) return existing.view instanceof AuditorView ? existing.view : null;
-		const leaf = this.app.workspace.getLeaf('tab');
-		await leaf.setViewState({ type: AUDITOR_VIEW_TYPE, active: false });
-		return leaf.view instanceof AuditorView ? leaf.view : null;
-	}
-
-	/**
-	 * Runs the control-drafting pipeline (in auto-mode) for an existing control in the background —
-	 * the Auditor view/tab is never revealed, so the user stays wherever they were (e.g. the Controls
-	 * view). Seeded from the control's own text; once the draft is ready, it's written straight back
-	 * into the control's file automatically, no further action needed.
-	 */
-	async startStage1Draft(file: TFile, record: ControlRecord): Promise<void> {
-		const view = await this.getOrCreateAuditorView();
-		view?.startPipelineForControl(file, record);
-	}
-
-	/** Runs the existing Stage 2 auto-drafting pipeline for an existing control in the background — same "don't reveal the Auditor tab" behavior as `startStage1Draft`. */
-	async startStage2Draft(file: TFile, record: ControlRecord): Promise<void> {
-		const view = await this.getOrCreateAuditorView();
-		void view?.draftStage2InBackground(file, record);
-	}
-
 	/** Opens (or reveals) the agent chat in the right sidebar. */
 	async activateChatView(): Promise<void> {
 		const existing = this.app.workspace.getLeavesOfType(AGENT_CHAT_VIEW_TYPE)[0];
@@ -462,9 +456,36 @@ export default class AuditorPlugin extends Plugin {
 	}
 
 	/**
+	 * Spot-indexes exactly the given files in `kind`'s store, instead of `runIndexing`'s full-folder
+	 * rescan — with a folder of thousands of controls, rescanning all of them for one edit is wasted
+	 * work. Use this after saving one or a few notes; reserve `runIndexing` for when the user actually
+	 * asks to re-index everything (the "Re-index …" buttons/commands). No "already indexing"
+	 * guard/Notice: safe to run alongside a full re-index or another spot index.
+	 */
+	async spotIndexFiles(kind: StoreKind, files: TFile[]): Promise<void> {
+		if (files.length === 0) return;
+		try {
+			await this.storeFor(kind).indexFiles(this.app.vault, files);
+			this.fileExplorerDecorator.scheduleRefresh();
+		} catch (e) {
+			console.error('[Auditor] spotIndexFiles failed', kind, e);
+			new Notice(`Auditor: failed to index ${files.length === 1 ? files[0]!.basename : `${files.length} files`} — ${String(e)}`);
+		}
+	}
+
+	/** Drops a stale path from `kind`'s index/manifest — used when a note is renamed, so the old path's entry doesn't linger until the next full re-index. */
+	async spotRemoveFile(kind: StoreKind, path: string): Promise<void> {
+		try {
+			await this.storeFor(kind).removeFile(path);
+		} catch (e) {
+			console.error('[Auditor] spotRemoveFile failed', kind, path, e);
+		}
+	}
+
+	/**
 	 * Creates a new note in the written-controls folder, in the canonical control-record format,
-	 * then re-indexes that folder so the new control is immediately searchable. The note's filename
-	 * is the audit template number (`record.number`).
+	 * then spot-indexes just that file so the new control is immediately searchable. The note's
+	 * filename is the audit template number (`record.number`).
 	 */
 	async saveControlNote(record: ControlRecord): Promise<void> {
 		const folder = this.settings.writtenControlsFolder;
@@ -475,7 +496,7 @@ export default class AuditorPlugin extends Plugin {
 		const content = buildControlNoteContent(record);
 		const file = await this.app.vault.create(path, content);
 		await this.app.workspace.getLeaf(false).openFile(file);
-		void this.runIndexing('writtenControls');
+		void this.spotIndexFiles('writtenControls', [file]);
 	}
 
 	/**
@@ -491,15 +512,17 @@ export default class AuditorPlugin extends Plugin {
 
 	/**
 	 * Writes many control records in one go (used by the Excel import feature): unlike
-	 * `saveControlNote`, this does not open each note and only re-indexes the written-controls
-	 * folder once at the end. When `overwrite` is false, filenames that collide with an existing
-	 * note get a numeric suffix instead of being touched; when true, the existing note's content is
-	 * replaced. Callers should confirm with the user (via `controlNotePath`) before passing `overwrite`.
+	 * `saveControlNote`, this does not open each note, and spot-indexes only the files actually
+	 * written here rather than rescanning the whole written-controls folder — importing 50 controls
+	 * into a folder of 2000 shouldn't re-walk the other 1950. When `overwrite` is false, filenames
+	 * that collide with an existing note get a numeric suffix instead of being touched; when true,
+	 * the existing note's content is replaced. Callers should confirm with the user (via
+	 * `controlNotePath`) before passing `overwrite`.
 	 */
 	async importControlRecords(records: ControlRecord[], overwrite = false): Promise<{ written: number; failed: { record: ControlRecord; error: string }[] }> {
 		const folder = this.settings.writtenControlsFolder;
 		const failed: { record: ControlRecord; error: string }[] = [];
-		let written = 0;
+		const writtenFiles: TFile[] = [];
 		for (const record of records) {
 			try {
 				const content = buildControlNoteContent(record);
@@ -515,20 +538,20 @@ export default class AuditorPlugin extends Plugin {
 							safeNumber = `${base}-${++suffix}`;
 							path = normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
 						}
-						await this.app.vault.create(path, content);
+						writtenFiles.push(await this.app.vault.create(path, content));
 					} else {
 						await this.app.vault.modify(existing, content);
+						writtenFiles.push(existing);
 					}
 				} else {
-					await this.app.vault.create(directPath, content);
+					writtenFiles.push(await this.app.vault.create(directPath, content));
 				}
-				written++;
 			} catch (e) {
 				failed.push({ record, error: String(e) });
 			}
 		}
-		if (written > 0) void this.runIndexing('writtenControls');
-		return { written, failed };
+		void this.spotIndexFiles('writtenControls', writtenFiles);
+		return { written: writtenFiles.length, failed };
 	}
 
 	/** The path a session's plan-reference note lives at — one note per session, named after it, holding just the ordered list of its EGs' IDs. */

@@ -1,7 +1,8 @@
 import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Header, PageBreak } from 'docx';
 import type { ControlRecord } from './controlNote';
-import { chipTextColorHex, ratingColorHex, readinessColorHex, statusColorHex, EXPORT_COLORS } from './exportColors';
+import { chipTextColorHex, ratingColorHex, readableTextOnHex, readinessColorHex, statusColorHex, EXPORT_COLORS } from './exportColors';
+import { drawPdfLogo, type PdfBranding } from './pdfBranding';
 
 export interface ExportControlEntry {
 	record: ControlRecord;
@@ -50,13 +51,14 @@ function ensureSpace(doc: jsPDF, y: number, needed: number): number {
 	return y;
 }
 
-export function buildControlsPdf(title: string, entries: ExportControlEntry[]): jsPDF {
+export function buildControlsPdf(title: string, entries: ExportControlEntry[], branding: PdfBranding): jsPDF {
 	const doc = new jsPDF({ unit: 'pt', format: 'a4' });
 
 	// ─── Cover page ───────────────────────────────────────────────────────
-	doc.setFillColor(EXPORT_COLORS.accent);
+	doc.setFillColor(branding.accentHex);
 	doc.rect(0, 0, PAGE_WIDTH, 180, 'F');
-	doc.setTextColor(EXPORT_COLORS.white);
+	drawPdfLogo(doc, branding.logo, PAGE_MARGIN, 18, 110, 48);
+	doc.setTextColor(readableTextOnHex(branding.accentHex));
 	doc.setFont('helvetica', 'bold');
 	doc.setFontSize(28);
 	const titleLines = splitText(doc, title, CONTENT_WIDTH);

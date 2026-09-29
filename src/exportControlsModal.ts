@@ -2,6 +2,7 @@ import { App, Modal, Notice } from 'obsidian';
 import type AuditorPlugin from './main';
 import type { ControlRecord } from './controlNote';
 import { buildControlsDocx, buildControlsPdf, type ExportControlEntry } from './exportControls';
+import { loadPdfLogo } from './pdfBranding';
 
 /** Asks for a document title (and format) before exporting the given controls — used from the Controls view, exporting whatever's currently filtered there. */
 export class ExportControlsModal extends Modal {
@@ -66,7 +67,8 @@ export class ExportControlsModal extends Modal {
 	private async export() {
 		const title = this.title.trim() || 'Controls export';
 		if (this.format === 'pdf') {
-			const doc = buildControlsPdf(title, this.entries);
+			const logo = await loadPdfLogo(this.app.vault, this.plugin.settings.pdfLogoPath);
+			const doc = buildControlsPdf(title, this.entries, { accentHex: this.plugin.settings.pdfAccentColor, logo });
 			return this.plugin.saveExportFile(title, 'pdf', doc.output('arraybuffer'));
 		}
 		const blob = await buildControlsDocx(title, this.entries);

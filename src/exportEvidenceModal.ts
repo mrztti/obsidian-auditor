@@ -3,6 +3,7 @@ import type AuditorPlugin from './main';
 import type { InterviewSessionPlan } from './evidenceGoal';
 import type { EvidenceResult } from './evidenceResult';
 import { buildEvidenceDocx, buildEvidencePdf, organizeEvidenceForExport } from './exportEvidence';
+import { loadPdfLogo } from './pdfBranding';
 
 /** Asks for a document title (and format) before exporting a session's Evidence Goals + captured Evidence Results (notes + screenshots) — used from the session-plan view. */
 export class ExportEvidenceModal extends Modal {
@@ -75,7 +76,8 @@ export class ExportEvidenceModal extends Modal {
 	}
 
 	private async exportPdf(title: string, sections: ReturnType<typeof organizeEvidenceForExport>) {
-		const doc = await buildEvidencePdf(title, this.plan.session, sections, this.app.vault);
+		const logo = await loadPdfLogo(this.app.vault, this.plugin.settings.pdfLogoPath);
+		const doc = await buildEvidencePdf(title, this.plan.session, sections, this.app.vault, { accentHex: this.plugin.settings.pdfAccentColor, logo });
 		return this.plugin.saveExportFile(title, 'pdf', doc.output('arraybuffer'));
 	}
 

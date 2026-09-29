@@ -1,6 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import * as mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 import { LocalDocumentIndex, type EmbeddingsModel } from 'vectra/browser';
 import { LocalFileStorage } from 'vectra/node';
 import { Vault, type TFile } from 'obsidian';
@@ -8,8 +9,8 @@ import { chunkMarkdown, chunkPdfPages } from './chunker';
 import { CachingEmbeddings } from './embeddingsCache';
 import { cellToString } from './controlImport';
 
-const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf', 'docx', 'xlsx', 'xls']);
-const BINARY_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'xls']);
+const INDEXABLE_EXTENSIONS = new Set(['md', 'pdf', 'docx', 'xlsx', 'xls', 'xlsb']);
+const BINARY_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'xls', 'xlsb']);
 
 // Injected at build time by esbuild.config.mjs: the full bundled source of
 // pdfjs-dist's worker, embedded as a string so it ships inside main.js itself
@@ -320,10 +321,15 @@ export class AuditVectorStore {
 				chunks = chunkPdfPages(await this.extractPdfPages(Buffer.from(rawContent, 'base64')), this.chunkWords);
 			} else if (file.extension === 'docx') {
 				chunks = chunkMarkdown(await this.extractDocxText(Buffer.from(rawContent, 'base64')), this.chunkWords);
-			} else if (file.extension === 'xlsx' || file.extension === 'xls') {
+			} else if (file.extension === 'xlsx') {
 				// Reuses chunkPdfPages: each worksheet stands in for a "page", so results still carry a
 				// sheet number (surfaced to the user as `page`) instead of a meaningless line number.
 				chunks = chunkPdfPages(await this.extractExcelSheets(Buffer.from(rawContent, 'base64')), this.chunkWords);
+			} else if (file.extension === 'xls' || file.extension === 'xlsb') {
+				// .xls (legacy BIFF) and .xlsb (binary) aren't OOXML zips, so exceljs can't read them —
+				// SheetJS handles both, plus xlsx, but exceljs stays the xlsx reader above since it's
+				// already relied on elsewhere (controlImport.ts) and battle-tested for that format.
+				chunks = chunkPdfPages(await this.extractLegacyExcelSheets(Buffer.from(rawContent, 'base64')), this.chunkWords);
 			} else {
 				chunks = chunkMarkdown(rawContent, this.chunkWords);
 			}
@@ -367,6 +373,67 @@ export class AuditVectorStore {
 		manifest[file.path] = { hash, chunkUris };
 		delete errors[file.path];
 		return 'indexed';
+	}
+
+	/**
+	 * Indexes exactly the given files — no full-folder scan, no removal sweep for files no longer
+	 * present. This is the "spot index" used after saving one or a few controls instead of
+	 * `indexFolder`, which walks the *entire* folder; with thousands of controls that walk is wasted
+	 * work for a single edit. Doesn't touch `isIndexing`/`cancelIndexing` (that pair describes the
+	 * big scan only) or clear the embeddings cache, so it can run alongside a full re-index or
+	 * another spot index — the underlying index mutations are already serialized by `withIndexLock`.
+	 */
+	async indexFiles(vault: Vault, files: TFile[]): Promise<IndexSummary> {
+		const targets = files.filter((f) => INDEXABLE_EXTENSIONS.has(f.extension));
+		log('indexFiles: starting', { count: targets.length });
+		const idx = await this.getIndex();
+		const manifest = await this.loadManifest();
+		const errors = await this.loadErrors();
+
+		const summary: IndexSummary = {
+			totalFiles: targets.length,
+			indexed: 0,
+			skippedUnchanged: 0,
+			skippedUnreadable: 0,
+			removed: 0,
+			cancelled: false,
+		};
+		for (const file of targets) {
+			try {
+				const status = await this.indexFile(idx, vault, file, manifest, errors);
+				if (status === 'indexed') summary.indexed++;
+				else if (status === 'unchanged') summary.skippedUnchanged++;
+				else summary.skippedUnreadable++;
+			} catch (e) {
+				console.error('[Auditor] failed to index', file.path, e);
+				errors[file.path] = String(e);
+				summary.skippedUnreadable++;
+			}
+		}
+		await this.persist();
+		log('indexFiles: complete', summary);
+		return summary;
+	}
+
+	/**
+	 * Drops one path's chunks from the index and its manifest/error entries — used when a note is
+	 * renamed or deleted so the stale entry under its old path doesn't linger until the next full
+	 * `indexFolder` sweep.
+	 */
+	async removeFile(path: string): Promise<void> {
+		const manifest = await this.loadManifest();
+		const errors = await this.loadErrors();
+		const previous = manifest[path];
+		const hadError = path in errors;
+		if (previous) {
+			const idx = await this.getIndex();
+			await this.withIndexLock(async () => {
+				for (const uri of previous.chunkUris) await idx.deleteDocument(uri);
+			});
+			delete manifest[path];
+		}
+		if (hadError) delete errors[path];
+		if (previous || hadError) await this.persist();
 	}
 
 	/** Extracts each PDF page's text, preserving line breaks (via `hasEOL`) so paragraph detection works. */
@@ -424,6 +491,24 @@ export class AuditVectorStore {
 		});
 	}
 
+	/**
+	 * Same shape as `extractExcelSheets` (one text block per worksheet, pipe-separated cells, blank
+	 * line between rows) but via SheetJS, which — unlike exceljs — reads the pre-OOXML binary formats:
+	 * legacy .xls (BIFF8) and .xlsb (Excel Binary Workbook, BIFF12).
+	 */
+	private async extractLegacyExcelSheets(data: Buffer): Promise<string[]> {
+		const workbook = XLSX.read(data, { type: 'buffer' });
+		return workbook.SheetNames.map((name) => {
+			const sheet = workbook.Sheets[name];
+			if (!sheet) return '';
+			const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: false, raw: true });
+			const lines = rows
+				.map((row) => row.map((cell) => cellToString(cell).trim()).filter(Boolean).join(' | '))
+				.filter(Boolean);
+			return lines.join('\n\n');
+		});
+	}
+
 	/** Paths of all files currently represented in this store's manifest (used to decorate the file explorer). */
 	async getIndexedPaths(): Promise<string[]> {
 		const manifest = await this.loadManifest();
@@ -444,7 +529,8 @@ export class AuditVectorStore {
 		if (!INDEXABLE_EXTENSIONS.has(file.extension) && file.extension !== 'txt') return null;
 		if (file.extension === 'pdf') return this.extractPdfPages(new Uint8Array(await vault.readBinary(file)));
 		if (file.extension === 'docx') return [await this.extractDocxText(Buffer.from(await vault.readBinary(file)))];
-		if (file.extension === 'xlsx' || file.extension === 'xls') return this.extractExcelSheets(Buffer.from(await vault.readBinary(file)));
+		if (file.extension === 'xlsx') return this.extractExcelSheets(Buffer.from(await vault.readBinary(file)));
+		if (file.extension === 'xls' || file.extension === 'xlsb') return this.extractLegacyExcelSheets(Buffer.from(await vault.readBinary(file)));
 		return [await vault.cachedRead(file)];
 	}
 

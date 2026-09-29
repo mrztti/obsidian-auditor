@@ -1,8 +1,8 @@
 import { Type } from '@google/genai';
 import type AuditorPlugin from '../../main';
-import { CONTROL_RATINGS, CONTROL_STATUSES } from '../../controlNote';
+import { CONTROL_RATINGS, CONTROL_STATUSES, todayIsoDate } from '../../controlNote';
 import { summarizeControl } from '../controlStore';
-import { EDITABLE_CONTROL_FIELDS, FIELD_LABELS, type ResolvedChange, type ReviewItem } from '../types';
+import { EDITABLE_CONTROL_FIELDS, FIELD_LABELS, STAGE_FOR_FIELD, type DiffEntry, type DraftStage, type EditableControlField, type ResolvedChange, type ReviewItem } from '../types';
 import { clampInt, str, type AgentTool } from './types';
 
 export const findControlsTool: AgentTool = {
@@ -73,15 +73,71 @@ export const getControlsTool: AgentTool = {
 
 const display = (v: string | boolean): string => (typeof v === 'boolean' ? (v ? 'yes' : 'no') : v);
 
+/** Fields that assert the control's current compliance/remediation status — changing any of these requires both current evidence (see `hasCurrentEvidence`) and a passed `qa_review_conclusion` for that (control, stage). */
+const STATUS_FIELDS = ['todConclusion', 'toeConclusion', 'todRating', 'toeRating'] as const;
+
+const STAGE_LABEL: Record<DraftStage, string> = { stage1: 'Stage 1', stage2: 'Stage 2' };
+
+const SELECT_OPTIONS: Partial<Record<EditableControlField, readonly string[]>> = {
+	status: CONTROL_STATUSES,
+	todRating: CONTROL_RATINGS,
+	toeRating: CONTROL_RATINGS,
+};
+
+/** Builds one field's diff entry, with a hand-edit descriptor that writes straight into `change.after` — so a refinement the user types in the review card is exactly what `apply()` saves, no separate plumbing needed. */
+function fieldEntry(change: ResolvedChange, field: EditableControlField): DiffEntry {
+	const before = display(change.before[field]);
+	const options = SELECT_OPTIONS[field];
+	const label = FIELD_LABELS[field];
+	if (typeof change.after[field] === 'boolean') {
+		return {
+			label,
+			before,
+			after: display(change.after[field]),
+			edit: { kind: 'boolean', get: () => change.after[field] as boolean, set: (v) => { (change.after as unknown as Record<string, unknown>)[field] = v; } },
+		};
+	}
+	if (options) {
+		return {
+			label,
+			before,
+			after: display(change.after[field]),
+			edit: { kind: 'select', options: [...options], get: () => change.after[field] as string, set: (v) => { (change.after as unknown as Record<string, unknown>)[field] = v; } },
+		};
+	}
+	return {
+		label,
+		before,
+		after: display(change.after[field]),
+		edit: { kind: 'text', get: () => change.after[field] as string, set: (v) => { (change.after as unknown as Record<string, unknown>)[field] = v; } },
+	};
+}
+
+/** The comments entry is special: only the newly-appended comments (one per line) are editable, each still auto-dated on save — the already-existing history above them is untouched either way. */
+function commentsEntry(change: ResolvedChange): DiffEntry {
+	const priorCount = change.before.comments.length;
+	return {
+		label: FIELD_LABELS.comments,
+		before: '',
+		after: change.after.comments.slice(priorCount).map((c) => `${c.date}: ${c.text}`).join('\n'),
+		edit: {
+			kind: 'text',
+			get: () => change.after.comments.slice(priorCount).map((c) => c.text).join('\n'),
+			set: (v) => {
+				const lines = v.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+				change.after.comments = [...change.before.comments, ...lines.map((text) => ({ date: todayIsoDate(), text }))];
+			},
+		},
+	};
+}
+
 function toReviewItem(change: ResolvedChange, plugin: AuditorPlugin): ReviewItem {
 	return {
 		key: change.number,
 		title: change.number,
 		subtitle: change.after.topic || change.after.control.slice(0, 60),
 		open: { label: 'Open note', run: () => { void plugin.app.workspace.getLeaf('tab').openFile(change.file); } },
-		entries: change.changedFields.map((field) => field === 'comments'
-			? { label: FIELD_LABELS.comments, before: '', after: change.after.comments.slice(change.before.comments.length).map((c) => `${c.date}: ${c.text}`).join('\n') }
-			: { label: FIELD_LABELS[field], before: display(change.before[field]), after: display(change.after[field]) }),
+		entries: change.changedFields.map((field) => (field === 'comments' ? commentsEntry(change) : fieldEntry(change, field))),
 	};
 }
 
@@ -133,6 +189,34 @@ export const proposeChangesTool: AgentTool = {
 		if ('error' in parsed) return { ok: false, output: { error: parsed.error }, summary: `Invalid proposal: ${parsed.error}` };
 		const resolved = ctx.controls.resolve(parsed.changes);
 		if (resolved.length === 0) return { ok: false, output: { error: 'None of the proposed values differ from the current content — nothing to change.' }, summary: 'Proposal contained no actual changes' };
+
+		const touchesStatus = resolved.some((c) => c.changedFields.some((f) => (STATUS_FIELDS as readonly string[]).includes(f)));
+		if (touchesStatus && !ctx.hasCurrentEvidence()) {
+			return {
+				ok: false,
+				output: {
+					error: 'This proposal changes a conclusion or rating, but this run has not looked at any current evidence — call search_documents (or list_documents/read_document) against "evidence" and/or "interviewEvidence", or get_session_plan, first. Reference reports (search_reference_style) are wording examples only and do not satisfy this — they never establish current compliance or remediation status.',
+				},
+				summary: 'Blocked: no current evidence gathered for a conclusion/rating change',
+			};
+		}
+
+		const missingQa: string[] = [];
+		for (const c of resolved) {
+			const stages = new Set(c.changedFields.map((f) => (f === 'comments' ? undefined : STAGE_FOR_FIELD[f])).filter((s): s is DraftStage => s !== undefined));
+			for (const stage of stages) {
+				if (!ctx.hasQaReview(c.number, stage)) missingQa.push(`${c.number} (${STAGE_LABEL[stage]})`);
+			}
+		}
+		if (missingQa.length > 0) {
+			return {
+				ok: false,
+				output: {
+					error: `qa_review_conclusion has not passed this run for: ${missingQa.join(', ')}. Call it for each, with passesQa true and citationsVerified true, before proposing its conclusion/rating.`,
+				},
+				summary: `Blocked: QA not passed for ${missingQa.join(', ')}`,
+			};
+		}
 
 		const decision = await ctx.host.requestApproval({ heading: `Review proposed changes (${resolved.length} control${resolved.length === 1 ? '' : 's'})`, summary: str(args.summary), items: resolved.map((c) => toReviewItem(c, ctx.plugin)) });
 		const toApply = resolved.filter((c) => decision.approved.includes(c.number));

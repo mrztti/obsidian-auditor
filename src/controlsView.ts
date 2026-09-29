@@ -1,4 +1,4 @@
-import { App, ItemView, Modal, TFile, WorkspaceLeaf, prepareFuzzySearch, setIcon } from 'obsidian';
+import { ItemView, Notice, TFile, WorkspaceLeaf, prepareFuzzySearch, setIcon } from 'obsidian';
 import type AuditorPlugin from './main';
 import {
 	buildControlNoteContent,
@@ -11,37 +11,14 @@ import {
 import { ImportControlsModal } from './importControlsModal';
 import { EvidenceGoalsModal } from './evidenceGoalsModal';
 import { ExportControlsModal } from './exportControlsModal';
+import type { DraftStage } from './agent/draftQueue';
 
 export const CONTROLS_VIEW_TYPE = 'auditor-controls-view';
 
-/** Confirms before an AI drafting button would overwrite an already-written conclusion — the pipelines run unattended and write straight to the file, so there's no other chance to catch this. */
-class ConfirmOverwriteModal extends Modal {
-	private message: string;
-	private onConfirm: () => void;
-
-	constructor(app: App, message: string, onConfirm: () => void) {
-		super(app);
-		this.message = message;
-		this.onConfirm = onConfirm;
-		this.setTitle('Overwrite existing conclusion?');
-	}
-
-	onOpen(): void {
-		this.contentEl.createEl('p', { text: this.message });
-		const actions = this.contentEl.createDiv('auditor-research-actions');
-		const cancelBtn = actions.createEl('button', { text: 'Cancel' });
-		cancelBtn.addEventListener('click', () => { this.close(); });
-		const continueBtn = actions.createEl('button', { text: 'Overwrite', cls: 'mod-warning' });
-		continueBtn.addEventListener('click', () => {
-			this.onConfirm();
-			this.close();
-		});
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-	}
-}
+const QUEUE_BUTTON_LABEL: Record<DraftStage, { add: string; queued: string }> = {
+	stage1: { add: 'Add stage 1 to queue', queued: 'Queued for stage 1 (click to remove)' },
+	stage2: { add: 'Add stage 2 to queue', queued: 'Queued for stage 2 (click to remove)' },
+};
 
 function ratingClass(rating: string): string {
 	if (rating === 'NC') return 'auditor-rating-nc';
@@ -123,6 +100,8 @@ function distinctValues(entries: { record: ControlRecord }[], key: 'session' | '
 export class ControlsView extends ItemView {
 	private plugin: AuditorPlugin;
 	private reload: () => Promise<void> = async () => {};
+	/** One `sync()` closure per currently-rendered queue button, re-run whenever the queue changes elsewhere (e.g. cleared/launched from the chat) so these cards stay truthful without a full grid reload. Reset on every grid rebuild. */
+	private queueButtonSyncs: (() => void)[] = [];
 
 	constructor(leaf: WorkspaceLeaf, plugin: AuditorPlugin) {
 		super(leaf);
@@ -142,6 +121,9 @@ export class ControlsView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
+		this.register(this.plugin.draftQueue.onChange(() => {
+			for (const sync of this.queueButtonSyncs) sync();
+		}));
 		const container = this.containerEl.children[1] as HTMLElement;
 		container.empty();
 		// Unlike the other views, this container itself does not scroll — position:sticky inside a
@@ -283,6 +265,7 @@ export class ControlsView extends ItemView {
 
 		const applyFilter = () => {
 			grid.empty();
+			this.queueButtonSyncs = [];
 			const filtered = currentlyFiltered();
 			status.setText(
 				filtered.length === allEntries.length
@@ -365,16 +348,18 @@ export class ControlsView extends ItemView {
 		void load();
 	}
 
-	/** Writes `updated` to `entry.file` (renaming if the number changed), re-indexes, then reloads the whole list — used by the quick status change. */
+	/** Writes `updated` to `entry.file` (renaming if the number changed), spot-indexes just that file, then reloads the whole list — used by the quick status change. */
 	private async persist(entry: { file: TFile; record: ControlRecord }, updated: ControlRecord, refresh: () => Promise<void>): Promise<void> {
 		const folder = this.plugin.settings.writtenControlsFolder;
 		const safeNumber = sanitizeFileTitle(updated.number || entry.file.basename);
 		const newPath = folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`;
-		if (newPath !== entry.file.path) {
+		const oldPath = entry.file.path;
+		if (newPath !== oldPath) {
 			await this.app.fileManager.renameFile(entry.file, newPath);
+			void this.plugin.spotRemoveFile('writtenControls', oldPath);
 		}
 		await this.app.vault.modify(entry.file, buildControlNoteContent(updated));
-		void this.plugin.runIndexing('writtenControls');
+		void this.plugin.spotIndexFiles('writtenControls', [entry.file]);
 		await refresh();
 	}
 
@@ -433,32 +418,28 @@ export class ControlsView extends ItemView {
 		egBtn.addEventListener('click', () => {
 			new EvidenceGoalsModal(this.app, this.plugin, entry.record).open();
 		});
-		const draftStage1Btn = cardActions.createEl('button', { text: 'Draft stage 1 (AI)' });
-		draftStage1Btn.addEventListener('click', () => {
-			const run = () => { void this.plugin.startStage1Draft(entry.file, entry.record); };
-			if (entry.record.todConclusion.trim()) {
-				new ConfirmOverwriteModal(
-					this.app,
-					`${entry.record.number || 'This control'} already has a Stage 1 conclusion. Running this will overwrite it once the draft is ready.`,
-					run,
-				).open();
-			} else {
-				run();
-			}
-		});
-		const draftStage2Btn = cardActions.createEl('button', { text: 'Draft stage 2 (AI)' });
-		draftStage2Btn.addEventListener('click', () => {
-			const run = () => { void this.plugin.startStage2Draft(entry.file, entry.record); };
-			if (entry.record.toeConclusion.trim()) {
-				new ConfirmOverwriteModal(
-					this.app,
-					`${entry.record.number || 'This control'} already has a Stage 2 conclusion. Running this will overwrite it once the draft is ready.`,
-					run,
-				).open();
-			} else {
-				run();
-			}
-		});
+		const queueBtn = (stage: DraftStage): HTMLButtonElement => {
+			const btn = cardActions.createEl('button');
+			const sync = () => {
+				const queued = this.plugin.draftQueue.has(entry.record.number, stage);
+				btn.setText(QUEUE_BUTTON_LABEL[stage][queued ? 'queued' : 'add']);
+				btn.toggleClass('is-queued', queued);
+			};
+			btn.addEventListener('click', () => {
+				if (this.plugin.draftQueue.has(entry.record.number, stage)) {
+					this.plugin.draftQueue.removeByControl(entry.record.number, stage);
+				} else {
+					this.plugin.draftQueue.add(entry.record.number, entry.record.topic || entry.record.control, stage);
+					new Notice(`Added ${entry.record.number || 'control'} (${stage === 'stage1' ? 'Stage 1' : 'Stage 2'}) to the chat's drafting queue.`);
+				}
+				sync();
+			});
+			sync();
+			this.queueButtonSyncs.push(sync);
+			return btn;
+		};
+		queueBtn('stage1');
+		queueBtn('stage2');
 
 		// ─── Middle column: full control text, never clamped ───────────────
 		const middle = card.createDiv('auditor-control-card-middle');

@@ -78,6 +78,8 @@ export const getSessionPlanTool: AgentTool = {
 			});
 		}
 		const limited = goals.slice(0, 40);
+		// Captured interview results are current-audit evidence (even "none captured yet" is a real finding).
+		if (includeResults) ctx.markCurrentEvidence();
 		return {
 			output: { session, groups: plan.groups, evidenceGoalCount: goals.length, evidenceGoals: limited, note: 'position and question order are 1-based; use goal ids and group ids from here when editing with propose_session_plan_changes.' },
 			summary: `Plan "${session}": ${goals.length} evidence goals`,

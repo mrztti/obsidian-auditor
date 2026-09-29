@@ -1,9 +1,13 @@
 import { setIcon } from 'obsidian';
 import { diffWords } from './diff';
-import type { ApplyOutcome, ApprovalDecision, ReviewItem, ReviewProposal } from './types';
+import type { ApplyOutcome, ApprovalDecision, DiffEntry, ReviewItem, ReviewProposal } from './types';
 
-function renderDiff(parent: HTMLElement, before: string, after: string): void {
-	const box = parent.createDiv('auditor-diff');
+function optionLabel(opt: string): string {
+	return opt === '-' ? 'N/A (-)' : opt || '(none)';
+}
+
+function fillDiff(box: HTMLElement, before: string, after: string): void {
+	box.empty();
 	if (!before.trim() && !after.trim()) {
 		box.createSpan({ text: '(empty)', cls: 'auditor-diff-empty' });
 		return;
@@ -12,6 +16,84 @@ function renderDiff(parent: HTMLElement, before: string, after: string): void {
 		if (part.type === 'same') box.appendText(part.text);
 		else box.createSpan({ text: part.text, cls: part.type === 'add' ? 'auditor-diff-add' : 'auditor-diff-del' });
 	}
+}
+
+/**
+ * One field's before/after diff, plus — when `entry.edit` is set — an "Edit" toggle that swaps the
+ * diff for a live input and writes every keystroke straight back into the underlying record via
+ * `edit.set`, so a hand refinement here is exactly what gets saved: no separate "apply my edits"
+ * step, the diff and the record are the same value shown two ways.
+ */
+function renderField(card: HTMLElement, entry: DiffEntry): void {
+	const row = card.createDiv('auditor-proposal-field');
+	const labelRow = row.createDiv('auditor-proposal-field-labelrow');
+	labelRow.createDiv({ text: entry.label, cls: 'auditor-proposal-field-label' });
+	const diffBox = row.createDiv('auditor-diff');
+
+	const { edit } = entry;
+	const original = entry.after;
+	const currentText = (): string => (edit ? (edit.kind === 'boolean' ? (edit.get() ? 'yes' : 'no') : edit.get()) : entry.after);
+
+	let editedBadge: HTMLElement | null = null;
+	const refresh = () => {
+		fillDiff(diffBox, entry.before, currentText());
+		editedBadge?.toggleClass('auditor-agent-hidden', currentText() === original);
+	};
+	refresh();
+	if (!edit) return;
+
+	editedBadge = labelRow.createSpan({ text: 'Edited', cls: 'auditor-proposal-edited-badge auditor-agent-hidden' });
+	const editToggle = labelRow.createEl('a', { text: 'Edit', cls: 'auditor-proposal-field-edit-toggle' });
+	const resetLink = labelRow.createEl('a', { text: 'Reset', cls: 'auditor-proposal-field-reset auditor-agent-hidden' });
+
+	let editWrap: HTMLElement | null = null;
+	let syncInput: (() => void) | null = null;
+
+	const openEditor = () => {
+		diffBox.addClass('auditor-agent-hidden');
+		editWrap = row.createDiv('auditor-proposal-edit');
+		if (edit.kind === 'boolean') {
+			const checkLabel = editWrap.createEl('label', { cls: 'auditor-checkbox-label' });
+			const checkbox = checkLabel.createEl('input', { type: 'checkbox' });
+			checkbox.checked = edit.get();
+			checkLabel.createSpan({ text: 'Yes' });
+			checkbox.addEventListener('change', () => { edit.set(checkbox.checked); refresh(); });
+			syncInput = () => { checkbox.checked = edit.get(); };
+		} else if (edit.kind === 'select') {
+			const select = editWrap.createEl('select', { cls: 'auditor-proposal-edit-select' });
+			for (const opt of edit.options) {
+				const optionEl = select.createEl('option', { text: optionLabel(opt), value: opt });
+				optionEl.selected = opt === edit.get();
+			}
+			select.addEventListener('change', () => { edit.set(select.value); refresh(); });
+			syncInput = () => { select.value = edit.get(); };
+		} else {
+			const textarea = editWrap.createEl('textarea', { cls: 'auditor-proposal-edit-textarea' });
+			textarea.value = edit.get();
+			textarea.addEventListener('input', () => { edit.set(textarea.value); refresh(); });
+			syncInput = () => { textarea.value = edit.get(); };
+		}
+		editToggle.setText('Done');
+	};
+	const closeEditor = () => {
+		editWrap?.remove();
+		editWrap = null;
+		syncInput = null;
+		diffBox.removeClass('auditor-agent-hidden');
+		editToggle.setText('Edit');
+	};
+
+	editToggle.addEventListener('click', (e) => {
+		e.preventDefault();
+		if (editWrap) closeEditor(); else openEditor();
+	});
+	resetLink.addEventListener('click', (e) => {
+		e.preventDefault();
+		if (edit.kind === 'boolean') edit.set(original === 'yes');
+		else edit.set(original);
+		syncInput?.();
+		refresh();
+	});
 }
 
 function renderItem(parent: HTMLElement, item: ReviewItem): { checkbox: HTMLInputElement; badge: HTMLElement; link: HTMLElement | null } {
@@ -33,11 +115,7 @@ function renderItem(parent: HTMLElement, item: ReviewItem): { checkbox: HTMLInpu
 	}
 	const badge = head.createSpan('auditor-proposal-badge');
 
-	for (const entry of item.entries) {
-		const row = card.createDiv('auditor-proposal-field');
-		row.createDiv({ text: entry.label, cls: 'auditor-proposal-field-label' });
-		renderDiff(row, entry.before, entry.after);
-	}
+	for (const entry of item.entries) renderField(card, entry);
 	return { checkbox, badge, link };
 }
 

@@ -207,10 +207,11 @@ export class ControlStore {
 		return resolved;
 	}
 
-	/** Writes the approved changes, refusing any whose note was edited since the agent read it. Re-indexes once at the end. */
+	/** Writes the approved changes, refusing any whose note was edited since the agent read it. Spot-indexes just the changed files (never the whole folder — the agent never renames, since `number` isn't an editable field). */
 	async apply(changes: ResolvedChange[]): Promise<ApplyOutcome[]> {
 		const { vault } = this.plugin.app;
 		const outcomes: ApplyOutcome[] = [];
+		const savedFiles: TFile[] = [];
 		for (const change of changes) {
 			try {
 				const current = await vault.read(change.file);
@@ -221,13 +222,14 @@ export class ControlStore {
 				const content = buildControlNoteContent(change.after);
 				await vault.modify(change.file, content);
 				this.snapshots.set(change.number, { file: change.file, record: change.after, content });
+				savedFiles.push(change.file);
 				outcomes.push({ key: change.number, ok: true });
 			} catch (e) {
 				outcomes.push({ key: change.number, ok: false, error: String(e) });
 			}
 		}
-		if (outcomes.some((o) => o.ok)) {
-			void this.plugin.runIndexing('writtenControls');
+		if (savedFiles.length > 0) {
+			void this.plugin.spotIndexFiles('writtenControls', savedFiles);
 			this.plugin.refreshControlsViews();
 		}
 		return outcomes;

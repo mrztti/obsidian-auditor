@@ -47,3 +47,21 @@ export function readinessColorHex(state: 'empty' | 'draft' | 'ready'): string {
 export function chipTextColorHex(bgHex: string): string {
 	return bgHex === EXPORT_COLORS.lightGray ? EXPORT_COLORS.textDark : EXPORT_COLORS.white;
 }
+
+/**
+ * Picks readable text (dark or white) for arbitrary background colors — used for the PDF cover
+ * band, whose color is now a user setting rather than the one fixed purple every other color
+ * helper here was written to match. Falls back to white (the old, fixed assumption) for a
+ * malformed hex value rather than throwing.
+ */
+export function readableTextOnHex(bgHex: string): string {
+	const match = /^#?([0-9a-f]{6})$/i.exec(bgHex.trim());
+	if (!match) return EXPORT_COLORS.white;
+	const hex = match[1]!;
+	const r = parseInt(hex.slice(0, 2), 16);
+	const g = parseInt(hex.slice(2, 4), 16);
+	const b = parseInt(hex.slice(4, 6), 16);
+	// Perceived luminance (ITU-R BT.601) — same rule of thumb used for chip text above, generalized.
+	const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+	return luminance > 0.6 ? EXPORT_COLORS.textDark : EXPORT_COLORS.white;
+}

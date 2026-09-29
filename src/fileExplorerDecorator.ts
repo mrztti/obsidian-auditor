@@ -1,4 +1,5 @@
 import type AuditorPlugin from './main';
+import type { StoreKind } from './main';
 
 const FILE_EXPLORER_VIEW_TYPE = 'file-explorer';
 const DOT_CLASS = 'auditor-indexed-dot';
@@ -30,26 +31,24 @@ export class FileExplorerDecorator {
 		}, 150);
 	}
 
+	private static readonly ALL_KINDS: StoreKind[] = ['standards', 'evidence', 'writtenControls', 'interviewEvidence', 'referenceReports'];
+
 	async refresh(): Promise<void> {
 		const plugin = this.plugin;
-		const [standardsOk, evidenceOk, writtenOk, interviewOk, standardsErr, evidenceErr, writtenErr, interviewErr] = await Promise.all([
-			plugin.standardsIndex.getIndexedPaths(),
-			plugin.evidenceIndex.getIndexedPaths(),
-			plugin.writtenControlsIndex.getIndexedPaths(),
-			plugin.interviewEvidenceIndex.getIndexedPaths(),
-			plugin.standardsIndex.getErroredPaths(),
-			plugin.evidenceIndex.getErroredPaths(),
-			plugin.writtenControlsIndex.getErroredPaths(),
-			plugin.interviewEvidenceIndex.getErroredPaths(),
-		]);
+		const perStore = await Promise.all(
+			FileExplorerDecorator.ALL_KINDS.map(async (kind) => {
+				const store = plugin.storeFor(kind);
+				return { ok: await store.getIndexedPaths(), err: await store.getErroredPaths() };
+			}),
+		);
 
 		const states = new Map<string, DotState>();
-		for (const path of [...standardsOk, ...evidenceOk, ...writtenOk, ...interviewOk]) {
-			states.set(path, { kind: 'indexed' });
+		for (const { ok } of perStore) {
+			for (const path of ok) states.set(path, { kind: 'indexed' });
 		}
 		// Errors take priority over a stale "indexed" state from a previous successful run.
-		for (const [path, message] of Object.entries({ ...standardsErr, ...evidenceErr, ...writtenErr, ...interviewErr })) {
-			states.set(path, { kind: 'error', message });
+		for (const { err } of perStore) {
+			for (const [path, message] of Object.entries(err)) states.set(path, { kind: 'error', message });
 		}
 
 		for (const leaf of plugin.app.workspace.getLeavesOfType(FILE_EXPLORER_VIEW_TYPE)) {

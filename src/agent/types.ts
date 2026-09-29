@@ -24,6 +24,16 @@ export const EDITABLE_CONTROL_FIELDS = [
 
 export type EditableControlField = typeof EDITABLE_CONTROL_FIELDS[number];
 
+export type DraftStage = 'stage1' | 'stage2';
+
+/** Which drafting stage a status-asserting field belongs to — used to require a matching `qa_review_conclusion` call before that stage's conclusion/rating can be proposed. */
+export const STAGE_FOR_FIELD: Partial<Record<EditableControlField, DraftStage>> = {
+	todConclusion: 'stage1',
+	todRating: 'stage1',
+	toeConclusion: 'stage2',
+	toeRating: 'stage2',
+};
+
 export const FIELD_LABELS: Record<EditableControlField | 'comments', string> = {
 	standard: 'Standard',
 	topic: 'Topic',
@@ -58,11 +68,19 @@ export interface ResolvedChange {
 	changedFields: (EditableControlField | 'comments')[];
 }
 
+/** How a `DiffEntry`'s "after" value can be hand-edited before approving — its own get/set instead of a plain value, so an edit writes straight into the underlying record the same `resolve()`/`apply()` path will save. */
+export type DiffEntryEdit =
+	| { kind: 'text'; get: () => string; set: (v: string) => void }
+	| { kind: 'select'; options: string[]; get: () => string; set: (v: string) => void }
+	| { kind: 'boolean'; get: () => boolean; set: (v: boolean) => void };
+
 /** One labelled before/after pair shown as a diff — the unit both control edits and session-plan edits are reviewed in. */
 export interface DiffEntry {
 	label: string;
 	before: string;
 	after: string;
+	/** Present when the user can hand-edit this entry's value before approving — controls' fields, not session-plan diffs (those are multi-operation summaries with no single settable value). */
+	edit?: DiffEntryEdit;
 }
 
 /** One thing the user can approve or reject independently (a control, or a whole session plan). */

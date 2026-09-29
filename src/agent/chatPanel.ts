@@ -2,8 +2,26 @@ import { Notice, setIcon } from 'obsidian';
 import type AuditorPlugin from '../main';
 import { renderChatMarkdownInto } from '../markdown';
 import { ChatAgent } from './agent';
+import type { DraftQueueItem, DraftStage } from './draftQueue';
 import { renderProposalCard, type ProposalCardHandle } from './proposalCard';
 import type { AgentEvent, AgentHost, AgentPlan, ApplyOutcome, ApprovalDecision, PlanStepStatus, ReviewProposal } from './types';
+
+const STAGE_LABEL: Record<DraftStage, string> = { stage1: 'Stage 1', stage2: 'Stage 2' };
+
+/** Composes the message that launches a batch of queued drafting targets — instructs the agent to work through them one at a time, in full, rather than skimming across all of them. */
+function buildQueueLaunchPrompt(items: DraftQueueItem[]): string {
+	const lines = items.map((item, i) => {
+		const parts = [`${i + 1}. Control ${item.controlNumber} — ${STAGE_LABEL[item.stage]}${item.topic ? ` (${item.topic})` : ''}`];
+		if (item.note.trim()) parts.push(`   Extra instructions for this item: ${item.note.trim()}`);
+		return parts.join('\n');
+	});
+	return [
+		`Write up the following ${items.length} queued conclusion${items.length === 1 ? '' : 's'}, one at a time, in the order listed. Quality over quantity: it is far better to finish fewer of these — done thoroughly, with real evidence and a genuine QA pass — than to rush through all of them.`,
+		'',
+		'Items:',
+		lines.join('\n'),
+	].join('\n');
+}
 
 const STEP_ICONS: Record<PlanStepStatus, string> = {
 	pending: 'circle',
@@ -176,13 +194,17 @@ export class ChatPanel {
 	private agent: ChatAgent;
 	private messagesEl!: HTMLElement;
 	private input!: HTMLTextAreaElement;
-	private sendBtn!: HTMLButtonElement;
 	private emptyEl: HTMLElement | null = null;
 	private currentRun: RunView | null = null;
+	private queueEl!: HTMLElement;
+	private queueLaunchBtn!: HTMLButtonElement;
+	private unsubscribeQueue: () => void;
 
 	constructor(private container: HTMLElement, private plugin: AuditorPlugin) {
 		this.agent = new ChatAgent(plugin);
 		this.render();
+		this.unsubscribeQueue = plugin.draftQueue.onChange(() => this.renderQueue());
+		this.renderQueue();
 	}
 
 	private render(): void {
@@ -191,24 +213,20 @@ export class ChatPanel {
 		const newChat = bar.createEl('button', { text: 'New chat', cls: 'auditor-chat-new' });
 		newChat.addEventListener('click', () => this.resetChat());
 
+		this.queueEl = this.container.createDiv('auditor-queue auditor-agent-hidden');
+
 		this.messagesEl = this.container.createDiv('auditor-chat-messages');
 		this.renderEmptyState();
 
 		const row = this.container.createDiv('auditor-chat-input-row');
-		this.input = row.createEl('textarea', { cls: 'auditor-pipeline-textarea' });
-		this.input.rows = 2;
-		this.input.placeholder = 'Ask about controls, evidence, standards or meetings — or tell me what to update…';
-		this.sendBtn = row.createEl('button', { text: 'Send', cls: 'mod-cta' });
-		this.sendBtn.addEventListener('click', () => this.submit());
+		this.input = row.createEl('textarea', { cls: 'auditor-chat-input' });
+		this.input.rows = 1;
+		this.input.placeholder = 'Ask about controls, evidence, standards or meetings…';
 		this.input.addEventListener('keydown', (e) => {
 			if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
 				e.preventDefault();
 				this.submit();
 			}
-		});
-		this.input.addEventListener('input', () => {
-			this.input.setCssProps({ height: 'auto' });
-			this.input.setCssProps({ height: `${Math.min(this.input.scrollHeight, 200)}px` });
 		});
 	}
 
@@ -230,6 +248,71 @@ export class ChatPanel {
 	dispose(): void {
 		this.currentRun?.cancelPending('The chat was closed.');
 		this.agent.stop();
+		this.unsubscribeQueue();
+	}
+
+	/**
+	 * The drafting-queue drawer: filled from the Controls view's "Add to queue" buttons, edited here
+	 * (per-item extra instructions, delete), and launched into a single agent run that works through
+	 * every item in order. Hidden entirely while empty so it doesn't clutter the chat for people not
+	 * using it.
+	 */
+	private renderQueue(): void {
+		const items = this.plugin.draftQueue.list();
+		this.queueEl.toggleClass('auditor-agent-hidden', items.length === 0);
+		if (items.length === 0) return;
+		this.queueEl.empty();
+
+		const header = this.queueEl.createDiv('auditor-queue-header');
+		setIcon(header.createSpan('auditor-queue-icon'), 'list-todo');
+		header.createSpan({ text: `Drafting queue (${items.length})`, cls: 'auditor-queue-title' });
+		const clearBtn = header.createEl('a', { text: 'Clear', cls: 'auditor-queue-clear' });
+		clearBtn.addEventListener('click', (e) => {
+			e.preventDefault();
+			this.plugin.draftQueue.clear();
+		});
+
+		const list = this.queueEl.createDiv('auditor-queue-list');
+		for (const item of items) {
+			const row = list.createDiv('auditor-queue-item');
+			const head = row.createDiv('auditor-queue-item-head');
+			head.createSpan({ text: item.controlNumber || '(no number)', cls: 'auditor-queue-item-number' });
+			head.createSpan({ text: STAGE_LABEL[item.stage], cls: `auditor-queue-item-stage auditor-queue-item-stage-${item.stage}` });
+			if (item.topic) head.createSpan({ text: item.topic, cls: 'auditor-queue-item-topic' });
+			const removeBtn = head.createEl('a', { text: 'Remove', cls: 'auditor-queue-item-remove' });
+			removeBtn.addEventListener('click', (e) => {
+				e.preventDefault();
+				this.plugin.draftQueue.remove(item.id);
+			});
+			const note = row.createEl('input', { type: 'text', cls: 'auditor-queue-item-note' });
+			note.placeholder = 'Add instructions for this item (optional)…';
+			note.value = item.note;
+			note.addEventListener('input', () => { this.plugin.draftQueue.setNote(item.id, note.value); });
+		}
+
+		const footer = this.queueEl.createDiv('auditor-queue-footer');
+		this.queueLaunchBtn = footer.createEl('button', { text: 'Launch queue', cls: 'mod-cta' });
+		this.queueLaunchBtn.addEventListener('click', () => this.launchQueue());
+		this.updateQueueLaunchState();
+	}
+
+	private updateQueueLaunchState(): void {
+		if (!this.queueLaunchBtn) return;
+		this.queueLaunchBtn.disabled = this.agent.isRunning || this.plugin.draftQueue.size === 0;
+		this.queueLaunchBtn.setText(this.agent.isRunning ? 'Agent is busy…' : 'Launch queue');
+	}
+
+	private launchQueue(): void {
+		const items = this.plugin.draftQueue.list();
+		if (items.length === 0 || this.agent.isRunning) return;
+		if (!this.plugin.settings.geminiApiKey) {
+			new Notice('Auditor: add your Gemini API key in the plugin settings first.');
+			return;
+		}
+		const prompt = buildQueueLaunchPrompt(items);
+		this.plugin.draftQueue.clear();
+		this.addUserMessage(`Launched the drafting queue: ${items.map((i) => `${i.controlNumber} (${STAGE_LABEL[i.stage]})`).join(', ')}.`);
+		void this.startRun(prompt);
 	}
 
 	private resetChat(): void {
@@ -262,7 +345,6 @@ export class ChatPanel {
 			return;
 		}
 		this.input.value = '';
-		this.input.setCssProps({ height: 'auto' });
 
 		if (this.agent.isRunning) {
 			this.agent.steer(text);
@@ -280,6 +362,7 @@ export class ChatPanel {
 			this.agent.stop();
 		}, this.scrollToBottom);
 		this.currentRun = run;
+		this.updateQueueLaunchState();
 		this.scrollToBottom();
 
 		const host: AgentHost = {
@@ -295,6 +378,7 @@ export class ChatPanel {
 		};
 		await this.agent.run(text, host);
 		if (this.currentRun === run) this.currentRun = null;
+		this.updateQueueLaunchState();
 		this.input.focus();
 	}
 }

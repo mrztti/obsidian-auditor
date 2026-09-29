@@ -5,16 +5,21 @@ import type { StoreKind } from '../../main';
 import type { SearchResult } from '../../vectorStore';
 import { clampInt, str, truncate, type AgentTool } from './types';
 
+// referenceReports is deliberately not a general search/list source: it must only be reached through
+// search_reference_style, which wraps every result in an explicit "style only, not evidence" warning —
+// mixing it into a general ranked search invites the model to treat a stylistic match as a factual one.
 const SOURCES: StoreKind[] = ['standards', 'evidence', 'interviewEvidence', 'writtenControls'];
+const CURRENT_EVIDENCE_SOURCES: StoreKind[] = ['evidence', 'interviewEvidence'];
 
 const SOURCE_DESCRIPTION =
-	'"standards" = the standards/requirements being audited against; "evidence" = evidence documents supplied by the audited party; "interviewEvidence" = meeting/interview notes and evidence gathered in sessions; "writtenControls" = the control notes themselves.';
+	'"standards" = the standards/requirements being audited against; "evidence" = evidence documents supplied by the audited party, current for this audit; "interviewEvidence" = meeting/interview notes and evidence gathered in sessions, current for this audit; "writtenControls" = the control notes themselves, in this audit. For finalized past-engagement reports (style reference only, never evidence), use search_reference_style instead.';
 
 function folderFor(plugin: AuditorPlugin, kind: StoreKind): string {
 	const s = plugin.settings;
 	if (kind === 'standards') return s.standardsFolder;
 	if (kind === 'evidence') return s.evidenceFolder;
 	if (kind === 'interviewEvidence') return s.interviewEvidenceFolder;
+	if (kind === 'referenceReports') return s.referenceReportsFolder;
 	return s.writtenControlsFolder;
 }
 
@@ -58,6 +63,7 @@ export const searchDocumentsTool: AgentTool = {
 		const results = perStore
 			.flatMap((rs, i) => rs.map((r) => ({ source: kinds[i]!, r })))
 			.sort((a, b) => b.r.score - a.r.score);
+		if (kinds.some((k) => CURRENT_EVIDENCE_SOURCES.includes(k))) ctx.markCurrentEvidence();
 		return {
 			output: {
 				resultCount: results.length,
@@ -88,6 +94,7 @@ export const listDocumentsTool: AgentTool = {
 	run: (args, ctx) => {
 		const source = str(args.source) as StoreKind;
 		if (!SOURCES.includes(source)) return Promise.resolve({ ok: false, output: { error: `source must be one of ${SOURCES.join(', ')}` }, summary: 'Unknown source' });
+		if (CURRENT_EVIDENCE_SOURCES.includes(source)) ctx.markCurrentEvidence();
 		const needle = str(args.nameContains).toLowerCase();
 		const folder = folderFor(ctx.plugin, source);
 		const files = ctx.plugin.app.vault
@@ -128,9 +135,12 @@ export const readDocumentTool: AgentTool = {
 		const { vault } = ctx.plugin.app;
 		const file = vault.getFileByPath(path);
 		if (!file) return { ok: false, output: { error: `No file at "${path}". Use list_documents or search_documents to get exact paths.` }, summary: `File not found: ${path}` };
-		const allowed = (['standards', 'evidence', 'interviewEvidence', 'writtenControls'] as StoreKind[]).some((k) => inFolder(file, folderFor(ctx.plugin, k)))
+		const isReference = inFolder(file, ctx.plugin.settings.referenceReportsFolder) && ctx.plugin.settings.referenceReportsFolder !== '';
+		const allowed = isReference
+			|| SOURCES.some((k) => inFolder(file, folderFor(ctx.plugin, k)))
 			|| inFolder(file, ctx.plugin.settings.interviewSessionPlansFolder);
 		if (!allowed) return { ok: false, output: { error: 'That file is outside the configured audit folders.' }, summary: 'File outside audit folders' };
+		if (SOURCES.some((k) => CURRENT_EVIDENCE_SOURCES.includes(k) && inFolder(file, folderFor(ctx.plugin, k)))) ctx.markCurrentEvidence();
 
 		let pages: string[] | null;
 		try {
@@ -150,10 +160,11 @@ export const readDocumentTool: AgentTool = {
 				path,
 				totalChars: text.length,
 				offset,
+				...(isReference ? { warning: 'STYLE REFERENCE ONLY — this is a finalized past-engagement report, not evidence. Do not treat anything below as fact, evidence, or the current status of this audit; it may only inform wording/structure.' } : {}),
 				text: slice,
 				...(end < text.length ? { nextOffset: end, note: 'Document continues — call read_document again with nextOffset if you need the rest.' } : {}),
 			},
-			summary: `Read ${path} (${offset}–${end} of ${text.length} chars)`,
+			summary: `Read ${path}${isReference ? ' (style reference only)' : ''} (${offset}–${end} of ${text.length} chars)`,
 		};
 	},
 };

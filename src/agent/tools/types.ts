@@ -2,7 +2,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type AuditorPlugin from '../../main';
 import type { ControlStore } from '../controlStore';
 import type { SessionPlanStore } from '../sessionPlanStore';
-import type { AgentHost, AgentPlan } from '../types';
+import type { AgentHost, AgentPlan, DraftStage } from '../types';
 
 export interface ToolContext {
 	plugin: AuditorPlugin;
@@ -11,6 +11,12 @@ export interface ToolContext {
 	host: AgentHost;
 	getPlan(): AgentPlan | null;
 	setPlan(plan: AgentPlan): void;
+	/** Whether this run has looked at any *current* evidence (the "evidence" or "interviewEvidence" indexes, or a session plan's captured results) — as opposed to reference reports, which are style-only. Checked before a conclusion/rating change is allowed to be proposed. */
+	hasCurrentEvidence(): boolean;
+	markCurrentEvidence(): void;
+	/** Whether `qa_review_conclusion` has passed for this exact (control, stage) in this run — required before propose_control_changes accepts a change to that stage's conclusion/rating. */
+	hasQaReview(controlNumber: string, stage: DraftStage): boolean;
+	markQaReview(controlNumber: string, stage: DraftStage): void;
 }
 
 export interface ToolResult {

@@ -166,13 +166,15 @@ export class ControlDetailView extends ItemView {
 			const folder = this.plugin.settings.writtenControlsFolder;
 			const safeNumber = sanitizeFileTitle(this.record.number || this.file.basename);
 			const newPath = folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`;
-			if (newPath !== this.file.path) {
+			const oldPath = this.file.path;
+			if (newPath !== oldPath) {
 				await this.app.fileManager.renameFile(this.file, newPath);
+				void this.plugin.spotRemoveFile('writtenControls', oldPath);
 			}
 			await this.app.vault.modify(this.file, buildControlNoteContent(this.record));
 			this.dirty = false;
 			this.statusEl.setText('Saved.');
-			void this.plugin.runIndexing('writtenControls');
+			void this.plugin.spotIndexFiles('writtenControls', [this.file]);
 			void this.plugin.refreshControlsViews();
 		} catch (e) {
 			this.saveBtn.disabled = false;

@@ -30,6 +30,10 @@ export class ChatAgent {
 	private stopped = false;
 	private running = false;
 	private toolCallId = 0;
+	/** Whether this run has looked at any current evidence/interview notes — reset per run; see `ToolContext.hasCurrentEvidence`. */
+	private evidenceGathered = false;
+	/** `"<controlNumber>:<stage>"` pairs that passed `qa_review_conclusion` this run — reset per run; see `ToolContext.hasQaReview`. */
+	private qaPassed = new Set<string>();
 
 	constructor(private plugin: AuditorPlugin) {
 		this.controls = new ControlStore(plugin);
@@ -64,6 +68,8 @@ export class ChatAgent {
 		this.running = true;
 		this.stopped = false;
 		this.plan = null;
+		this.evidenceGathered = false;
+		this.qaPassed.clear();
 		this.compactHistory();
 		this.controls.resetSnapshots();
 		this.sessionPlans.resetSnapshots();
@@ -79,6 +85,10 @@ export class ChatAgent {
 				this.plan = plan;
 				host.emit({ type: 'plan', plan });
 			},
+			hasCurrentEvidence: () => this.evidenceGathered,
+			markCurrentEvidence: () => { this.evidenceGathered = true; },
+			hasQaReview: (controlNumber, stage) => this.qaPassed.has(`${controlNumber}:${stage}`),
+			markQaReview: (controlNumber, stage) => { this.qaPassed.add(`${controlNumber}:${stage}`); },
 		};
 		const declarations = AGENT_TOOLS.map((t) => t.declaration);
 		const systemPrompt = buildSystemPrompt();

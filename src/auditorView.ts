@@ -146,6 +146,7 @@ const SEARCH_STORE_LABELS: Record<StoreKind, string> = {
 	evidence: 'Evidence',
 	writtenControls: 'Written controls',
 	interviewEvidence: 'Interview evidence',
+	referenceReports: 'Reference reports',
 };
 
 function sourceLabel(result: SearchResult): string {
@@ -305,6 +306,11 @@ export class AuditorView extends ItemView {
 			reindexRow,
 			'Re-index interview evidence',
 			'interviewEvidence',
+		);
+		this.createReindexButton(
+			reindexRow,
+			'Re-index reference reports',
+			'referenceReports',
 		);
 		this.createEvidenceGoalReindexButton(reindexRow);
 
@@ -1467,7 +1473,7 @@ export class AuditorView extends ItemView {
 		try {
 			statusEl.setText('Saving…');
 			await this.app.vault.modify(targetFile, buildControlNoteContent(this.pipelineState.draftRecord));
-			void this.plugin.runIndexing('writtenControls');
+			void this.plugin.spotIndexFiles('writtenControls', [targetFile]);
 			this.logStep(`Saved Stage 1 to ${this.pipelineState.draftRecord.number || targetFile.basename}`);
 			this.plugin.refreshControlsViews();
 			statusEl.setText('Saved.');
@@ -1680,6 +1686,7 @@ export class AuditorView extends ItemView {
 		}
 
 		let anySaved = false;
+		const savedFiles: TFile[] = [];
 		let cursor = 0;
 		const worker = async (): Promise<void> => {
 			while (cursor < targets.length) {
@@ -1695,6 +1702,7 @@ export class AuditorView extends ItemView {
 						setStep,
 					);
 					anySaved = true;
+					savedFiles.push(target.file);
 					setStep('Done');
 					refs.spinner.removeClass('auditor-spinner');
 					refs.spinner.addClass('auditor-step-done');
@@ -1712,7 +1720,7 @@ export class AuditorView extends ItemView {
 		);
 		await Promise.all(Array.from({ length: workerCount }, worker));
 
-		if (anySaved) void this.plugin.runIndexing('writtenControls');
+		if (anySaved) void this.plugin.spotIndexFiles('writtenControls', savedFiles);
 		runBtn.disabled = false;
 	}
 
@@ -1786,7 +1794,7 @@ export class AuditorView extends ItemView {
 	async draftStage2InBackground(file: TFile, record: ControlRecord): Promise<void> {
 		try {
 			await this.runStage2Auto(file, record, () => {});
-			void this.plugin.runIndexing('writtenControls');
+			void this.plugin.spotIndexFiles('writtenControls', [file]);
 			this.plugin.refreshControlsViews();
 			new Notice(`Auditor: drafted Stage 2 for ${record.number || file.basename}`);
 		} catch (e) {
@@ -1813,7 +1821,11 @@ export class AuditorView extends ItemView {
 		});
 		const setupSelect = setupField.createEl('select');
 		setupSelect.createEl('option', { text: '— choose a file —', value: '' });
-		for (const file of this.app.vault.getFiles().filter((f) => f.extension === 'md')) {
+		// The written-controls folder holds the control notes themselves, not client-setup material —
+		// excluded here so they never show up as a candidate "client setup description" file.
+		const controlsFolder = this.plugin.settings.writtenControlsFolder;
+		const isControlNote = (f: TFile): boolean => !!controlsFolder && (f.path === controlsFolder || f.path.startsWith(`${controlsFolder}/`));
+		for (const file of this.app.vault.getFiles().filter((f) => f.extension === 'md' && !isControlNote(f))) {
 			setupSelect.createEl('option', { text: file.path, value: file.path });
 		}
 

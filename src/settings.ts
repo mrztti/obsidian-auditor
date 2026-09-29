@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import AuditorPlugin from './main';
+import { EXPORT_COLORS } from './exportColors';
 
 export interface AuditorSettings {
 	/** Gemini API key, stored in plain text in data.json (same as every other plugin holding an API key). */
@@ -14,10 +15,16 @@ export interface AuditorSettings {
 	writtenControlsFolder: string;
 	/** Vault folder containing interview evidence (Test of Effectiveness / Stage 2 evidence). */
 	interviewEvidenceFolder: string;
+	/** Vault folder containing finalized audit reports, kept purely as style/structure reference for how Stage 1/2 conclusions should read for a given control — never edited or cited as evidence itself. */
+	referenceReportsFolder: string;
 	/** Vault folder where interview session plans live: one reference note per session (an ordered list of Evidence Goal IDs), plus an `evidence-goals` subfolder holding one note per Evidence Goal. */
 	interviewSessionPlansFolder: string;
 	/** Vault folder exported PDF/Word documents (controls, evidence) are saved into. Empty = vault root. */
 	exportsFolder: string;
+	/** Hex color for PDF exports' cover-page band and section headings — was a fixed purple, now user-configurable. Applies to PDF exports only (Word exports use their own default styling). */
+	pdfAccentColor: string;
+	/** Vault path to an image (PNG/JPEG) drawn top-left of every PDF export's cover header. Empty = no logo. */
+	pdfLogoPath: string;
 	maxResults: number;
 	/** Target paragraph-chunk size in words. */
 	chunkWords: number;
@@ -123,8 +130,11 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	evidenceFolder: '',
 	writtenControlsFolder: '',
 	interviewEvidenceFolder: '',
+	referenceReportsFolder: '',
 	interviewSessionPlansFolder: '',
 	exportsFolder: '',
+	pdfAccentColor: EXPORT_COLORS.accent,
+	pdfLogoPath: '',
 	maxResults: 10,
 	chunkWords: 300,
 	defaultWritingRules: DEFAULT_WRITING_RULES,
@@ -247,6 +257,20 @@ export class AuditorSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Reference reports folder')
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Stage 1/2" is a literal report term
+			.setDesc('Vault folder containing finalized audit reports from past engagements, indexed separately and used only as a style/structure reference — how Stage 1/2 conclusions for a similar control were written — never as evidence.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Reference reports')
+					.setValue(this.plugin.settings.referenceReportsFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.referenceReportsFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
 			.setName('Interview session plans folder')
 			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Evidence Goals" names the plugin's own concept
 			.setDesc('Vault folder where interview session plans are stored — one reference note per session, plus a subfolder with one note per Evidence Goal.')
@@ -270,6 +294,31 @@ export class AuditorSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.exportsFolder)
 					.onChange(async (value) => {
 						this.plugin.settings.exportsFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('PDF highlight color')
+			.setDesc('Accent color used for the cover-page band and section headings in PDF exports (controls, evidence). Text color on the band adjusts automatically for contrast.')
+			.addColorPicker((picker) =>
+				picker
+					.setValue(this.plugin.settings.pdfAccentColor)
+					.onChange(async (value) => {
+						this.plugin.settings.pdfAccentColor = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('PDF logo image')
+			.setDesc('Vault path to an image (PNG or JPEG) shown at the top left of every PDF export\'s cover header. Leave empty for no logo.')
+			.addText((text) =>
+				text
+					.setPlaceholder('Attachments/logo.png')
+					.setValue(this.plugin.settings.pdfLogoPath)
+					.onChange(async (value) => {
+						this.plugin.settings.pdfLogoPath = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);
