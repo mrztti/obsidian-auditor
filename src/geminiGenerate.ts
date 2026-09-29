@@ -905,9 +905,11 @@ export class GeminiGenerate {
 		contents: Content[],
 		systemInstruction: string,
 		functionDeclarations: FunctionDeclaration[],
+		/** "Burn Mode" override — a more capable/expensive model id for a quality-sensitive step (QA, planning, drafting). Falls back to the regular generation model when unset. */
+		model: string = this.model,
 	): Promise<GenerateContentResponse> {
 		return this.ai.models.generateContent({
-			model: this.model,
+			model,
 			contents,
 			config: {
 				systemInstruction,
@@ -1041,10 +1043,26 @@ export class GeminiGenerate {
 			'name/description/questions/type. controlNumbers always lists every control this exact',
 			'decision covers.',
 			'',
-			'An EG\'s description should say exactly what should be captured and why it matters. Questions',
-			'are what the auditor should ask the interviewee to prompt them into showing/navigating to it.',
-			'Use the client\'s actual setup (below) and each control\'s existing evidence to ground',
-			'descriptions/questions in what is realistically there to find, rather than generic wording.',
+			'PLAIN LANGUAGE, NOT TECHNICAL PRECISION. These EGs are read aloud by an auditor in a live',
+			'interview with someone who is often not technical, and the whole point is that they are quick',
+			'and easy to follow — not a restatement of the control or standard\'s own clause language.',
+			'Write every name, description and question the way you would casually explain it to a',
+			'colleague, never the way the requirement itself is phrased:',
+			'- name: a short, plain caption of the SCREENSHOT/FILE itself, not the control — e.g. "Network',
+			'  diagram screenshot", "MFA settings screen", "Completed onboarding flow". Never restate a',
+			'  clause number, policy name or technical setting as the EG\'s name.',
+			'- description: one GLOBAL, plain-language sentence describing what the screenshot/file should',
+			'  show — e.g. "A screenshot of the network diagram" or "A screenshot showing a completed',
+			'  onboarding flow" — not a technical breakdown of every sub-requirement it happens to satisfy.',
+			'  One simple, general description covering several related requirements at once is the goal,',
+			'  not a precise enumeration of each one.',
+			'- questions: simple, everyday things to ask to get there — e.g. "Can you show me the network',
+			'  diagram?" or "Can you walk me through completing an onboarding?" — never multi-clause,',
+			'  jargon-heavy asks that read like the standard itself. Usually one short question is enough.',
+			'Use each control\'s existing evidence and the client\'s actual setup (below) only to make sure',
+			'the plain description points at something that genuinely exists — never to add technical',
+			'detail back into the wording. If a control or standard is highly technical, that technicality',
+			'is for your own understanding of what to look for, not for what gets written into the EG.',
 			'',
 			'The client\'s actual setup, to the best of our knowledge (ground truth for what evidence',
 			'realistically exists and where):',
@@ -1062,16 +1080,20 @@ export class GeminiGenerate {
 	}
 
 	/**
-	 * "Prepare session" final pass, once per group: does TWO things in one call, to keep large
+	 * "Prepare session" final pass, once per group: does THREE things in one call, to keep large
 	 * sessions (which can have many groups) cheap. (1) LIMITED further compression the batched
 	 * planning above may have missed — only pairs/groups of EGs that verify the literal same
 	 * screenshot/file, where merging loses nothing; deliberately conservative, since over-merging here
-	 * recreates the exact "one overloaded EG" problem grouping was meant to avoid. (2) Refines each
-	 * EG's questions against `referenceContext` — excerpts from finalized reports of a PAST, closed
-	 * engagement for a similar topic — to point the interview at what specifically might have changed
-	 * since then, e.g. "confirm whether the password policy is still 90 days, noted differently last
-	 * time" rather than a generic question. The past report is a prompt for what to re-verify, never a
-	 * source of the current answer — never phrase a question as if the old finding already still holds.
+	 * recreates the exact "one overloaded EG" problem grouping was meant to avoid. (2) Simplifies any
+	 * EG whose name/description/questions still read as technical or precise rather than plain,
+	 * global, easy-to-ask language — a backstop for whatever the batched planning call above missed,
+	 * since the whole point of this pipeline is a session plan a non-technical interviewer can
+	 * actually follow. (3) Refines each EG's questions against `referenceContext` — excerpts from
+	 * finalized reports of a PAST, closed engagement for a similar topic — to point the interview at
+	 * what specifically might have changed since then, while keeping the question just as plain, e.g.
+	 * "Can you show me the current network diagram? Last time it looked different." The past report is
+	 * a prompt for what to re-verify, never a source of the current answer — never phrase a question
+	 * as if the old finding already still holds.
 	 */
 	async finalizeEvidenceGoals(
 		groupTitle: string,
@@ -1089,7 +1111,7 @@ export class GeminiGenerate {
 
 		const prompt = [
 			`You are doing a final pass over the Evidence Goals (EGs) planned for the "${groupTitle}"`,
-			'topic group of an audit interview session, with two jobs:',
+			'topic group of an audit interview session, with three jobs:',
 			'',
 			'1) LIMITED further compression: only pairs/groups of EGs that verify the literal same',
 			'screenshot/file, where merging loses nothing. Only propose a merge when it genuinely',
@@ -1099,26 +1121,39 @@ export class GeminiGenerate {
 			'EGs separate; a slightly longer list of focused EGs is the correct, better outcome here, not',
 			'a failure to compress.',
 			'',
-			'2) Sharpen each EG\'s questions using the excerpts below from a finalized report of a PAST,',
-			'CLOSED engagement on a similar topic. That old report is CLOSED and may be outdated — use it',
-			'only to spot SPECIFIC things worth re-checking because they were noted before and commonly',
-			'drift over time (a policy value, a named tool/vendor, a configuration setting, a named',
-			'owner/role). Turn that into a pointed question that asks the interviewee to confirm the',
-			'CURRENT state — e.g. "Confirm whether the session timeout is still 15 minutes, as noted',
-			'previously" — never state the old finding as still true, and never invent a specific detail',
-			'that isn\'t actually in the excerpts below. If nothing specific is worth flagging for an EG,',
-			'leave its questions as they are.',
+			'2) SIMPLIFY. These EGs get read aloud by an auditor in a live interview, often with someone',
+			'non-technical — they must be quick and easy to follow, not a restatement of a control or',
+			'standard\'s own clause language. For any EG whose name, description or questions still sound',
+			'technical, precise or jargon-heavy, rewrite them plainly:',
+			'- name: a short, plain caption of the screenshot/file itself — e.g. "Network diagram',
+			'  screenshot", "Completed onboarding flow" — never a clause number, policy name or setting.',
+			'- description: one GLOBAL, plain sentence of what the screenshot should show — e.g. "A',
+			'  screenshot of the network diagram" or "A screenshot showing a completed onboarding flow" —',
+			'  not a technical enumeration of every sub-requirement it happens to satisfy.',
+			'- questions: simple, everyday asks — e.g. "Can you show me the network diagram?" — never',
+			'  multi-clause or jargon-heavy. Usually one short question is enough.',
+			'If an EG already reads this way, leave it alone.',
 			'',
-			'Only include an entry for an EG you are actually changing (merging and/or refining its',
-			'questions/description); leave out anything unchanged. For a merge, list all its source IDs',
-			'and write the single replacement EG (name/description/questions/type) covering every control',
-			'the merged EGs covered — already incorporating any history-driven refinement from job 2. For',
-			'a refinement-only change, list just that one EG\'s ID with its complete updated fields.',
+			'3) Sharpen questions using the excerpts below from a finalized report of a PAST, CLOSED',
+			'engagement on a similar topic — but keep them just as plain as job 2 requires. That old',
+			'report is CLOSED and may be outdated — use it only to spot SPECIFIC things worth re-checking',
+			'because they were noted before and commonly drift over time (a policy value, a named',
+			'tool/vendor, a configuration setting, a named owner/role). Turn that into a plain question',
+			'that asks the interviewee to confirm the CURRENT state — e.g. "Can you show me the current',
+			'network diagram? It looked different last time." — never state the old finding as still',
+			'true, and never invent a specific detail that isn\'t actually in the excerpts below. If',
+			'nothing specific is worth flagging for an EG, leave its questions as they are.',
+			'',
+			'Only include an entry for an EG you are actually changing (merged, simplified and/or',
+			'refined); leave out anything unchanged. For a merge, list all its source IDs and write the',
+			'single replacement EG (name/description/questions/type) covering every control the merged',
+			'EGs covered — already simplified and incorporating any history-driven refinement. For a',
+			'non-merge change, list just that one EG\'s ID with its complete updated fields.',
 			'',
 			'Evidence goals in this group:',
 			block,
 			'',
-			'Excerpts from a past, closed engagement\'s finalized report, on a similar topic (style/history reference only — see job 2 above):',
+			'Excerpts from a past, closed engagement\'s finalized report, on a similar topic (style/history reference only — see job 3 above):',
 			referenceContext || '(none found)',
 		].join('\n');
 

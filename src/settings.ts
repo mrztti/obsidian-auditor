@@ -7,6 +7,8 @@ export interface AuditorSettings {
 	geminiApiKey: string;
 	embeddingModel: string;
 	generationModel: string;
+	/** Optional, more capable/expensive Gemini model ID — used by the chat agent's own steps only when "Burn Mode" is enabled in the chat AND the agent has marked the current step quality-sensitive (QA, planning, drafting). Empty disables Burn Mode regardless of the chat toggle. Never used for session planning or RAG lookups, which always stay on the regular generation model. */
+	boostedModel: string;
 	/** Vault folder containing the standards used for auditing (e.g. ETSI 119431). */
 	standardsFolder: string;
 	/** Vault folder containing audit evidence. */
@@ -126,6 +128,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	geminiApiKey: '',
 	embeddingModel: 'gemini-embedding-2',
 	generationModel: 'gemini-3.6-flash',
+	boostedModel: '',
 	standardsFolder: '',
 	evidenceFolder: '',
 	writtenControlsFolder: '',
@@ -198,6 +201,21 @@ export class AuditorSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.generationModel)
 					.onChange(async (value) => {
 						this.plugin.settings.generationModel = value.trim() || DEFAULT_SETTINGS.generationModel;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Boosted model')
+			// eslint-disable-next-line obsidianmd/ui/sentence-case -- "QA", "Burn Mode" and "Gemini" are literal terms
+			.setDesc('Optional, more capable (and more expensive) Gemini model ID. Used by the chat agent only for the steps it marks quality-sensitive (QA, planning, drafting a conclusion) — and only while "Burn Mode" is switched on in the chat. Leave empty to disable Burn Mode entirely; everything else (session planning, searches/lookups) always uses the generation model above regardless.')
+			.addText((text) =>
+				text
+					// eslint-disable-next-line obsidianmd/ui/sentence-case -- literal model ID
+					.setPlaceholder('e.g. gemini-3.6-pro')
+					.setValue(this.plugin.settings.boostedModel)
+					.onChange(async (value) => {
+						this.plugin.settings.boostedModel = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);

@@ -17,6 +17,8 @@ export interface ToolContext {
 	/** Whether `qa_review_conclusion` has passed for this exact (control, stage) in this run — required before propose_control_changes accepts a change to that stage's conclusion/rating. */
 	hasQaReview(controlNumber: string, stage: DraftStage): boolean;
 	markQaReview(controlNumber: string, stage: DraftStage): void;
+	/** Whether Burn Mode (the boosted model) is active for the step currently in progress — a tool that produces a reviewable proposal tags it with this, so the UI can frame it accordingly. */
+	isBurnActive(): boolean;
 }
 
 export interface ToolResult {

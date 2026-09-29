@@ -22,7 +22,7 @@ export const updatePlanTool: AgentTool = {
 	declaration: {
 		name: 'update_plan',
 		description:
-			'Create or revise your working plan. The user sees this plan live in the chat, so call it FIRST (before any other tool) with the full step list, and call it again every time a step starts, finishes, or the plan changes. Always send the complete list of steps, not a diff.',
+			'Create or revise your working plan. The user sees this plan live in the chat, so call it FIRST (before any other tool) with the full step list, and call it again every time a step starts, finishes, or the plan changes. Always send the complete list of steps, not a diff. Mark a step burn: true when it is quality-sensitive enough to be worth the more expensive "boosted" model — QA, planning, or drafting a conclusion — and burn: false (or omit it) for routine work like searches/lookups or session-plan editing. This only actually uses the boosted model if the user has switched Burn Mode on in the chat and a boosted model is configured; otherwise it is a harmless no-op, so mark steps honestly regardless of whether you expect it to be active.',
 		parameters: {
 			type: Type.OBJECT,
 			properties: {
@@ -36,6 +36,7 @@ export const updatePlanTool: AgentTool = {
 							id: { type: Type.STRING, description: 'Short stable id, e.g. "s1".' },
 							title: { type: Type.STRING, description: 'Imperative, under ~12 words.' },
 							status: { type: Type.STRING, enum: STATUSES, description: 'At most one step should be in_progress. Use failed for a step that could not be completed.' },
+							burn: { type: Type.BOOLEAN, description: 'True if this step is quality-sensitive (QA, planning, drafting a conclusion) and worth the boosted model, if available. False/omit for routine steps.' },
 						},
 						required: ['id', 'title', 'status'],
 					},
@@ -53,7 +54,8 @@ export const updatePlanTool: AgentTool = {
 			if (!title) continue;
 			const rawStatus = raw && typeof raw === 'object' ? str((raw as Record<string, unknown>).status) : '';
 			const id = raw && typeof raw === 'object' ? str((raw as Record<string, unknown>).id) : '';
-			steps.push({ id: id || `s${i + 1}`, title, status: STATUSES.includes(rawStatus as PlanStepStatus) ? (rawStatus as PlanStepStatus) : 'pending' });
+			const burn = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).burn === true : false;
+			steps.push({ id: id || `s${i + 1}`, title, status: STATUSES.includes(rawStatus as PlanStepStatus) ? (rawStatus as PlanStepStatus) : 'pending', burn });
 		}
 		if (steps.length === 0) {
 			return { ok: false, output: { error: 'Every step needs a non-empty "title" (imperative, under ~12 words). Send the plan again as steps: [{id, title, status}, ...].' }, summary: 'Plan rejected: steps had no titles' };

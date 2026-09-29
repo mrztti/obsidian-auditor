@@ -63,7 +63,11 @@ export class ChatAgent {
 		this.steering.push(text);
 	}
 
-	async run(userText: string, host: AgentHost): Promise<void> {
+	/**
+	 * @param isBurnModeEnabled Read live before every model turn (not captured once), so flipping the
+	 * chat's Burn Mode toggle mid-run takes effect on the very next turn rather than needing a new run.
+	 */
+	async run(userText: string, host: AgentHost, isBurnModeEnabled: () => boolean = () => false): Promise<void> {
 		if (this.running) throw new Error('The agent is already running.');
 		this.running = true;
 		this.stopped = false;
@@ -75,6 +79,8 @@ export class ChatAgent {
 		this.sessionPlans.resetSnapshots();
 		this.history.push({ role: 'user', parts: [{ text: userText }] });
 
+		/** Recomputed once per model turn, just before calling it — see `currentTurnModel`. */
+		let burnActiveThisTurn = false;
 		const ctx: ToolContext = {
 			plugin: this.plugin,
 			controls: this.controls,
@@ -89,6 +95,7 @@ export class ChatAgent {
 			markCurrentEvidence: () => { this.evidenceGathered = true; },
 			hasQaReview: (controlNumber, stage) => this.qaPassed.has(`${controlNumber}:${stage}`),
 			markQaReview: (controlNumber, stage) => { this.qaPassed.add(`${controlNumber}:${stage}`); },
+			isBurnActive: () => burnActiveThisTurn,
 		};
 		const declarations = AGENT_TOOLS.map((t) => t.declaration);
 		const systemPrompt = buildSystemPrompt();
@@ -99,12 +106,15 @@ export class ChatAgent {
 			for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
 				if (this.stopped) {
 					this.history.push({ role: 'model', parts: [{ text: '(Stopped by the user.)' }] });
-					host.emit({ type: 'final', text: 'Stopped.', askedUser: false });
+					host.emit({ type: 'final', text: 'Stopped.', askedUser: false, burn: false });
 					return;
 				}
 				this.drainSteering();
 
-				const response = await this.plugin.geminiGenerate.agentStep(this.history, systemPrompt, declarations);
+				const currentStep = this.openPlanSteps().find((s) => s.status === 'in_progress');
+				const boostedModel = this.plugin.settings.boostedModel.trim();
+				burnActiveThisTurn = isBurnModeEnabled() && !!currentStep?.burn && boostedModel !== '';
+				const response = await this.plugin.geminiGenerate.agentStep(this.history, systemPrompt, declarations, burnActiveThisTurn ? boostedModel : undefined);
 				const content = response.candidates?.[0]?.content;
 				if (!content?.parts?.length) {
 					throw new Error(response.promptFeedback?.blockReason ? `The model blocked the request (${response.promptFeedback.blockReason}).` : 'The model returned an empty response.');
@@ -125,7 +135,7 @@ export class ChatAgent {
 						if (text) host.emit({ type: 'note', text });
 						continue;
 					}
-					host.emit({ type: 'final', text: text || 'Done.', askedUser: false });
+					host.emit({ type: 'final', text: text || 'Done.', askedUser: false, burn: burnActiveThisTurn });
 					return;
 				}
 
@@ -148,7 +158,7 @@ export class ChatAgent {
 					const args = call.args ?? {};
 					const tool = TOOLS_BY_NAME.get(name);
 					const id = ++this.toolCallId;
-					host.emit({ type: 'tool_start', id, name, label: tool ? tool.label(args) : `Unknown tool ${name}` });
+					host.emit({ type: 'tool_start', id, name, label: tool ? tool.label(args) : `Unknown tool ${name}`, burn: burnActiveThisTurn });
 
 					let result: ToolResult;
 					if (!tool) {
@@ -169,7 +179,7 @@ export class ChatAgent {
 
 				if (askedQuestion !== null) {
 					this.history.push({ role: 'model', parts: [{ text: askedQuestion }] });
-					host.emit({ type: 'final', text: askedQuestion, askedUser: true });
+					host.emit({ type: 'final', text: askedQuestion, askedUser: true, burn: burnActiveThisTurn });
 					return;
 				}
 			}

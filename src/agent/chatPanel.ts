@@ -31,6 +31,13 @@ const STEP_ICONS: Record<PlanStepStatus, string> = {
 	failed: 'x-circle',
 };
 
+/** A small "Burn Mode" fire-outline badge — pink→orange gradient, via a CSS mask rather than `setIcon` so the gradient shows through the icon's own outline shape instead of a flat currentColor fill. */
+function createBurnIcon(container: HTMLElement, label = 'Burn Mode'): HTMLElement {
+	const icon = container.createSpan({ cls: 'auditor-burn-icon' });
+	icon.setAttr('aria-label', label);
+	return icon;
+}
+
 const SUGGESTIONS = [
 	'Draft the Stage 1 conclusion for a control from the evidence we have',
 	'Which non-conform controls still have no recommendation in their conclusion?',
@@ -95,6 +102,7 @@ class RunView {
 			const li = list.createEl('li', { cls: `auditor-plan-step is-${step.status}${isNew ? ' is-new' : ''}` });
 			setIcon(li.createSpan('auditor-plan-step-icon'), STEP_ICONS[step.status]);
 			li.createSpan({ text: step.title, cls: 'auditor-plan-step-title' });
+			if (step.burn) createBurnIcon(li, 'Burn Mode step — uses the boosted model');
 		}
 		this.scroll();
 	}
@@ -105,12 +113,13 @@ class RunView {
 		this.scroll();
 	}
 
-	toolStart(id: number, label: string): void {
+	toolStart(id: number, label: string, burn: boolean): void {
 		this.activityDetails.removeClass('auditor-agent-hidden');
 		this.toolCount++;
 		const row = this.activityList.createDiv('auditor-activity-row is-running');
 		setIcon(row.createSpan('auditor-activity-icon'), 'loader-2');
 		row.createSpan({ text: label, cls: 'auditor-activity-label' });
+		if (burn) createBurnIcon(row, 'Ran with Burn Mode (boosted model)');
 		this.toolRows.set(id, row);
 		this.setStatus(label);
 		this.scroll();
@@ -178,7 +187,10 @@ class RunView {
 			this.root.createDiv({ text: event.message, cls: 'auditor-run-error' });
 		} else {
 			this.setStatus(event.askedUser ? 'Needs your input' : event.text === 'Stopped.' ? 'Stopped' : 'Done');
-			if (event.text !== 'Stopped.') renderChatMarkdownInto(this.root.createDiv('auditor-chat-message-text'), event.text);
+			if (event.text !== 'Stopped.') {
+				const wrap = this.root.createDiv(event.burn ? 'auditor-burn-frame' : undefined);
+				renderChatMarkdownInto(wrap.createDiv('auditor-chat-message-text'), event.text);
+			}
 		}
 		this.reconcilePlan(event);
 		if (this.toolCount > 0) {
@@ -199,6 +211,8 @@ export class ChatPanel {
 	private queueEl!: HTMLElement;
 	private queueLaunchBtn!: HTMLButtonElement;
 	private unsubscribeQueue: () => void;
+	/** "Burn Mode": while on, plan steps the agent itself marks quality-sensitive (QA, planning, drafting) use the boosted model from settings instead of the regular one. Per-chat UI state, not persisted. */
+	private burnModeEnabled = false;
 
 	constructor(private container: HTMLElement, private plugin: AuditorPlugin) {
 		this.agent = new ChatAgent(plugin);
@@ -227,6 +241,32 @@ export class ChatPanel {
 				e.preventDefault();
 				this.submit();
 			}
+		});
+
+		this.renderBurnModeToggle(this.container);
+	}
+
+	/**
+	 * "Burn Mode" toggle — a plain switch below the input, not a settings-page control, since it's
+	 * meant to be flicked per-task the way you'd reach for a more expensive tool only when it's worth
+	 * it. It only ever does anything when a boosted model is actually configured; otherwise it's shown
+	 * disabled with a pointer to where to set one, rather than silently doing nothing.
+	 */
+	private renderBurnModeToggle(container: HTMLElement): void {
+		const hasBoostedModel = this.plugin.settings.boostedModel.trim() !== '';
+		const row = container.createDiv('auditor-burn-toggle-row');
+		const label = row.createEl('label', { cls: `auditor-burn-toggle${hasBoostedModel ? '' : ' is-disabled'}` });
+		const checkbox = label.createEl('input', { type: 'checkbox' });
+		checkbox.checked = this.burnModeEnabled;
+		checkbox.disabled = !hasBoostedModel;
+		createBurnIcon(label);
+		label.createSpan({ text: 'Burn Mode', cls: 'auditor-burn-toggle-text' });
+		checkbox.addEventListener('change', () => { this.burnModeEnabled = checkbox.checked; });
+		row.createSpan({
+			text: hasBoostedModel
+				? 'Lets the agent use the boosted model for steps it marks quality-sensitive (QA, planning, drafting).'
+				: 'Set a boosted model in Auditor settings to enable this.',
+			cls: 'auditor-field-description',
 		});
 	}
 
@@ -369,14 +409,14 @@ export class ChatPanel {
 			emit: (event) => {
 				if (event.type === 'plan') run.renderPlan(event.plan);
 				else if (event.type === 'note') run.addNote(event.text);
-				else if (event.type === 'tool_start') run.toolStart(event.id, event.label);
+				else if (event.type === 'tool_start') run.toolStart(event.id, event.label, event.burn);
 				else if (event.type === 'tool_end') run.toolEnd(event.id, event.ok, event.summary);
 				else run.finish(event);
 			},
 			requestApproval: (proposal) => run.showProposal(proposal),
 			reportApplied: (outcomes) => run.showApplied(outcomes),
 		};
-		await this.agent.run(text, host);
+		await this.agent.run(text, host, () => this.burnModeEnabled);
 		if (this.currentRun === run) this.currentRun = null;
 		this.updateQueueLaunchState();
 		this.input.focus();

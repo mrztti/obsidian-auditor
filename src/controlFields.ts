@@ -15,6 +15,22 @@ interface FieldHelpers {
 	commentsField: (label: string, get: () => ControlComment[], add: (text: string) => void) => void;
 }
 
+/**
+ * Keeps a keystroke's DEFAULT text-editing behavior (insert/delete) intact while stopping the event
+ * from bubbling any further up the DOM. Without this, a plain `<textarea>`/`<input>` here — unlike
+ * Obsidian's own CodeMirror-based editor, which consumes its own keystrokes at the editor level —
+ * lets every keydown bubble past this view to whatever else is listening app-wide. Observed
+ * concretely: bare Backspace silently failing to delete a character in these fields (Cmd+Backspace
+ * still worked) while typing every other key, and while every other text field in the app — Obsidian's
+ * own editor, this plugin's own chat input — was unaffected; something upstream of this specific view
+ * was intercepting and swallowing bare Backspace before the field's own default deletion ran. Calling
+ * `stopPropagation` (never `preventDefault`, so normal typing/deleting is untouched) closes that off
+ * regardless of what the upstream listener turns out to be.
+ */
+function stopKeydownBubbling(el: HTMLElement): void {
+	el.addEventListener('keydown', (evt) => { evt.stopPropagation(); });
+}
+
 /** Builds field-rendering helpers bound to `container`, each firing `onChange` after every edit. Every field uses the same small-uppercase-label styling for visual consistency, whether full-width or compact. */
 export function createFieldHelpers(container: HTMLElement, onChange: () => void): FieldHelpers {
 	const field = (label: string, cls: string): HTMLElement => {
@@ -26,6 +42,7 @@ export function createFieldHelpers(container: HTMLElement, onChange: () => void)
 		const wrap = field(label, 'auditor-field-full');
 		const input = wrap.createEl('input', { type: 'text' });
 		input.value = get();
+		stopKeydownBubbling(input);
 		input.addEventListener('input', () => { set(input.value); onChange(); });
 	};
 	const textArea: FieldHelpers['textArea'] = (label, rows, get, set, growable = false) => {
@@ -33,6 +50,7 @@ export function createFieldHelpers(container: HTMLElement, onChange: () => void)
 		const textarea = wrap.createEl('textarea', { cls: `auditor-pipeline-textarea${growable ? ' auditor-textarea-grow' : ''}` });
 		textarea.rows = rows;
 		textarea.value = get();
+		stopKeydownBubbling(textarea);
 		textarea.addEventListener('input', () => { set(textarea.value); onChange(); });
 	};
 	const dropdown: FieldHelpers['dropdown'] = (label, options, get, set) => {
@@ -48,6 +66,7 @@ export function createFieldHelpers(container: HTMLElement, onChange: () => void)
 		const wrap = field(label, 'auditor-field-compact');
 		const input = wrap.createEl('input', { type: 'text' });
 		input.value = get();
+		stopKeydownBubbling(input);
 		input.addEventListener('input', () => { set(input.value); onChange(); });
 	};
 	const compactDropdown: FieldHelpers['compactDropdown'] = (label, options, get, set) => {
@@ -99,6 +118,7 @@ export function createFieldHelpers(container: HTMLElement, onChange: () => void)
 		};
 		addBtn.addEventListener('click', submit);
 		input.addEventListener('keydown', (evt) => {
+			evt.stopPropagation();
 			if ((evt.metaKey || evt.ctrlKey) && evt.key === 'Enter') {
 				evt.preventDefault();
 				submit();
@@ -131,6 +151,7 @@ export function renderGeneralFields(
 	compactDropdown('Status', CONTROL_STATUSES.includes(record.status) ? CONTROL_STATUSES : [record.status, ...CONTROL_STATUSES], () => record.status, (v) => { record.status = v; });
 
 	textArea('Control', 4, () => record.control, (v) => { record.control = v; });
+	textArea('Audit guidance', 3, () => record.auditGuidance, (v) => { record.auditGuidance = v; });
 	commentsField('Comments', () => record.comments, (text) => {
 		record.comments.push({ date: todayIsoDate(), text });
 		onCommentAdded();

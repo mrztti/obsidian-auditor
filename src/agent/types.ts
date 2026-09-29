@@ -7,6 +7,8 @@ export interface PlanStep {
 	id: string;
 	title: string;
 	status: PlanStepStatus;
+	/** "Burn Mode": the agent's own judgment that this step is quality-sensitive enough (QA, planning, drafting a conclusion) to warrant the boosted model — used only while the current step is `in_progress`, only when the user has switched Burn Mode on in the chat, and only when a boosted model is actually configured. */
+	burn?: boolean;
 }
 
 /** The agent's working plan — rewritten by the model via `update_plan` and mirrored live in the chat UI. */
@@ -17,7 +19,7 @@ export interface AgentPlan {
 
 /** Fields the agent may change on a control. `number` is deliberately absent: it is the note's filename. */
 export const EDITABLE_CONTROL_FIELDS = [
-	'standard', 'topic', 'control', 'session', 'assignedMember', 'status',
+	'standard', 'topic', 'control', 'auditGuidance', 'session', 'assignedMember', 'status',
 	'todConclusion', 'todRating', 'todReady',
 	'toeConclusion', 'toeRating', 'toeReady',
 ] as const;
@@ -38,6 +40,7 @@ export const FIELD_LABELS: Record<EditableControlField | 'comments', string> = {
 	standard: 'Standard',
 	topic: 'Topic',
 	control: 'Control',
+	auditGuidance: 'Audit guidance',
 	session: 'Session',
 	assignedMember: 'Assigned member',
 	status: 'Status',
@@ -97,6 +100,8 @@ export interface ReviewProposal {
 	heading: string;
 	summary: string;
 	items: ReviewItem[];
+	/** Whether Burn Mode (the boosted model) was active when this proposal was generated — shown as a gradient frame around the review card. */
+	burn?: boolean;
 }
 
 export interface ApprovalDecision {
@@ -115,9 +120,9 @@ export interface ApplyOutcome {
 export type AgentEvent =
 	| { type: 'plan'; plan: AgentPlan }
 	| { type: 'note'; text: string }
-	| { type: 'tool_start'; id: number; name: string; label: string }
+	| { type: 'tool_start'; id: number; name: string; label: string; burn: boolean }
 	| { type: 'tool_end'; id: number; ok: boolean; summary: string }
-	| { type: 'final'; text: string; askedUser: boolean }
+	| { type: 'final'; text: string; askedUser: boolean; burn: boolean }
 	| { type: 'error'; message: string };
 
 export interface AgentHost {

@@ -21,6 +21,7 @@ const FIELD_LABELS: Record<ControlFieldKey, string> = {
 	standard: 'Standard',
 	topic: 'Topic',
 	control: 'Control',
+	auditGuidance: 'Audit guidance',
 	session: 'Session',
 	assignedMember: 'Assigned member',
 	status: 'Status',

@@ -132,9 +132,13 @@ export function renderProposalCard(
 	proposal: ReviewProposal,
 	decide: (decision: ApprovalDecision) => void,
 ): ProposalCardHandle {
-	const card = parent.createDiv('auditor-proposal');
+	const card = parent.createDiv(proposal.burn ? 'auditor-proposal auditor-burn-frame' : 'auditor-proposal');
 	const header = card.createDiv('auditor-proposal-header');
 	setIcon(header.createSpan('auditor-proposal-icon'), 'git-pull-request-draft');
+	if (proposal.burn) {
+		const burnIcon = header.createSpan({ cls: 'auditor-burn-icon' });
+		burnIcon.setAttr('aria-label', 'Generated with Burn Mode (boosted model)');
+	}
 	const headingEl = header.createSpan({ text: proposal.heading, cls: 'auditor-proposal-heading' });
 	if (proposal.summary) card.createEl('p', { text: proposal.summary, cls: 'auditor-proposal-summary' });
 

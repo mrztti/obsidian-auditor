@@ -2128,8 +2128,8 @@ export class AuditorView extends ItemView {
 			}
 			finalizeLabel.setText(
 				mergedCount > 0 || refinedCount > 0
-					? `Compressed ${mergedCount} evidence goal(s) away, refined ${refinedCount} against reference reports.`
-					: 'No further compression or refinement found.',
+					? `Compressed ${mergedCount} evidence goal(s) away, simplified/refined ${refinedCount}.`
+					: 'No further compression or simplification found.',
 			);
 			finalizeSpinner.removeClass('auditor-spinner');
 			finalizeSpinner.addClass('auditor-step-done');

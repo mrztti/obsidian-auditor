@@ -24,6 +24,8 @@ export interface ControlRecord {
 	standard: string;
 	topic: string;
 	control: string;
+	/** Free-text instructions for how THIS control specifically should be assessed/written up — house rules, what to look for, anything beyond the generic writing conventions. Read (not just stored) by the drafting agent when writing this control's conclusions. */
+	auditGuidance: string;
 	session: string;
 	assignedMember: string;
 	status: string;
@@ -42,7 +44,7 @@ export interface ControlRecord {
 }
 
 export const CONTROL_FIELD_KEYS = [
-	'number', 'standard', 'topic', 'control', 'session', 'assignedMember', 'status',
+	'number', 'standard', 'topic', 'control', 'auditGuidance', 'session', 'assignedMember', 'status',
 	'todConclusion', 'todRating',
 	'toeConclusion', 'toeRating',
 ] as const;
@@ -55,6 +57,7 @@ export function emptyControlRecord(number = ''): ControlRecord {
 		standard: '',
 		topic: '',
 		control: '',
+		auditGuidance: '',
 		session: '',
 		assignedMember: '',
 		status: 'To-Do',
@@ -113,6 +116,7 @@ export function buildControlNoteContent(record: ControlRecord): string {
 		'## Standard', '', record.standard, '',
 		'## Topic', '', record.topic, '',
 		'## Control', '', record.control, '',
+		'## Audit Guidance', '', record.auditGuidance, '',
 		'## Session', '', record.session, '',
 		'## Assigned Member', '', record.assignedMember, '',
 		'## Status', '', record.status, '',
@@ -154,6 +158,7 @@ export function parseControlNoteContent(content: string, fallbackNumber = ''): C
 		standard: sections.get('Standard') ?? '',
 		topic: sections.get('Topic') ?? '',
 		control: sections.get('Control') ?? '',
+		auditGuidance: sections.get('Audit Guidance') ?? '',
 		session: sections.get('Session') ?? '',
 		assignedMember: sections.get('Assigned Member') ?? '',
 		status: sections.get('Status') ?? '',

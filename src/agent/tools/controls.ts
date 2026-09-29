@@ -163,6 +163,7 @@ export const proposeChangesTool: AgentTool = {
 									standard: { type: Type.STRING },
 									topic: { type: Type.STRING },
 									control: { type: Type.STRING },
+									auditGuidance: { type: Type.STRING, description: 'House instructions for how this specific control should be assessed/written up — edit only if the user asks you to change the guidance itself, not as part of drafting a conclusion from it.' },
 									session: { type: Type.STRING },
 									assignedMember: { type: Type.STRING },
 									status: { type: Type.STRING, enum: CONTROL_STATUSES },
@@ -218,7 +219,7 @@ export const proposeChangesTool: AgentTool = {
 			};
 		}
 
-		const decision = await ctx.host.requestApproval({ heading: `Review proposed changes (${resolved.length} control${resolved.length === 1 ? '' : 's'})`, summary: str(args.summary), items: resolved.map((c) => toReviewItem(c, ctx.plugin)) });
+		const decision = await ctx.host.requestApproval({ heading: `Review proposed changes (${resolved.length} control${resolved.length === 1 ? '' : 's'})`, summary: str(args.summary), items: resolved.map((c) => toReviewItem(c, ctx.plugin)), burn: ctx.isBurnActive() });
 		const toApply = resolved.filter((c) => decision.approved.includes(c.number));
 		const outcomes = toApply.length > 0 ? await ctx.controls.apply(toApply) : [];
 		ctx.host.reportApplied(outcomes);

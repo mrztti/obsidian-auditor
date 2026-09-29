@@ -249,6 +249,7 @@ export function summarizeControl(entry: ControlEntry): Record<string, unknown> {
 		toeRating: r.toeRating,
 		hasStage1Conclusion: r.todConclusion.trim() !== '',
 		hasStage2Conclusion: r.toeConclusion.trim() !== '',
+		hasAuditGuidance: r.auditGuidance.trim() !== '',
 		controlPreview: r.control.length > 200 ? `${r.control.slice(0, 200)}…` : r.control,
 	};
 }

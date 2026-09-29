@@ -56,6 +56,7 @@ export const proposeSessionPlanChangesTool: AgentTool = {
 			heading: `Review session plan changes: ${session}`,
 			summary: str(args.summary),
 			items: [resolved.item],
+			burn: ctx.isBurnActive(),
 		});
 		if (!decision.approved.includes(session)) {
 			ctx.host.reportApplied([]);
