@@ -14,6 +14,10 @@ import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView
 import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
 import { AgentChatView, AGENT_CHAT_VIEW_TYPE } from './agent/chatView';
 import { DraftQueue } from './agent/draftQueue';
+import { ResearchCache } from './agent/researchCache';
+import { AgentMemoryStore } from './agent/memory';
+import { RapidFireStore } from './rapidFire/store';
+import { RapidFireView, RAPID_FIRE_VIEW_TYPE } from './rapidFire/view';
 import { SessionPlanPickerModal } from './sessionPlanPickerModal';
 import { FileExplorerDecorator } from './fileExplorerDecorator';
 import { AddControlModal } from './addControlModal';
@@ -50,17 +54,32 @@ export default class AuditorPlugin extends Plugin {
 	geminiGenerate!: GeminiGenerate;
 	fileExplorerDecorator!: FileExplorerDecorator;
 	rateLimiter!: RateLimiter;
+	/** Paces the Rapid Fire engine's own Gemini generation calls — see `rapidFireMaxRequestsPerSecond`. */
+	rapidFireRateLimiter!: RateLimiter;
 	/** Drafting targets queued from the Controls view, reviewed and launched from the chat panel's queue drawer. */
 	draftQueue = new DraftQueue();
+	/** Every Rapid Fire batch this session — see `RapidFireStore` (Epic 8). */
+	rapidFireStore = new RapidFireStore();
+	/** Caches agent research-tool results across runs/chats — see `ResearchCache` (FR-5.2). */
+	researchCache!: ResearchCache;
+	/** Durable agent facts that survive across chat sessions — see `AgentMemoryStore` (FR-6.3). */
+	agentMemory!: AgentMemoryStore;
 
 	async onload() {
 		log('onload: plugin loading');
 		await this.loadSettings();
 
+		this.researchCache = new ResearchCache(this);
+		this.agentMemory = new AgentMemoryStore(this);
+
 		this.rateLimiter = new RateLimiter(
 			this.settings.maxRequestsPerSecond,
 			this.settings.gradualRampUp,
 		);
+		// Separate from `rateLimiter` (embeddings/indexing) on purpose: generation calls are a
+		// different Gemini quota, and Rapid Fire's own pacing shouldn't compete with or be throttled
+		// by whatever indexing happens to be doing at the same time.
+		this.rapidFireRateLimiter = new RateLimiter(this.settings.rapidFireMaxRequestsPerSecond, false);
 		const embeddings = new GeminiEmbeddings(
 			this.settings.geminiApiKey,
 			this.settings.embeddingModel,
@@ -152,6 +171,10 @@ export default class AuditorPlugin extends Plugin {
 		this.registerView(
 			AGENT_CHAT_VIEW_TYPE,
 			(leaf) => new AgentChatView(leaf, this),
+		);
+		this.registerView(
+			RAPID_FIRE_VIEW_TYPE,
+			(leaf) => new RapidFireView(leaf, this),
 		);
 
 		this.addRibbonIcon('message-square', 'Open auditor chat', () => {
@@ -439,6 +462,18 @@ export default class AuditorPlugin extends Plugin {
 		}
 		void this.app.workspace.revealLeaf(leaf);
 		if (leaf.view instanceof SessionPlanView) await leaf.view.setSession(session);
+	}
+
+	/** Opens (or reuses) the Rapid Fire view as a main-area tab and points it at the given batch — same "push state after activating" pattern as `openControlDetail`/`openSessionPlan`. */
+	async openRapidFire(batchId: string): Promise<void> {
+		const leaves = this.app.workspace.getLeavesOfType(RAPID_FIRE_VIEW_TYPE);
+		let leaf = leaves[0];
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf('tab');
+			await leaf.setViewState({ type: RAPID_FIRE_VIEW_TYPE, active: true });
+		}
+		void this.app.workspace.revealLeaf(leaf);
+		if (leaf.view instanceof RapidFireView) await leaf.view.setBatch(batchId);
 	}
 
 	/** Reloads open session-plan views showing `session` (unless they hold unsaved edits) — called after the agent saved changes to it. */

@@ -1,4 +1,5 @@
 import { Type } from '@google/genai';
+import { ResearchCache } from '../researchCache';
 import { clampInt, str, truncate, type AgentTool } from './types';
 
 const RESULT_WARNING = 'STYLE ONLY — a finalized, closed past engagement. Do not treat this as evidence, as fact, or as the current status of anything in this audit.';
@@ -22,7 +23,11 @@ export const searchReferenceStyleTool: AgentTool = {
 		const query = str(args.query).trim();
 		if (!query) return { ok: false, output: { error: 'query is required.' }, summary: 'Empty query' };
 		const limit = clampInt(args.limit, 5, 1, 10);
-		const results = await ctx.plugin.referenceReportsIndex.search(query, limit);
+		const cacheKey = ResearchCache.key('search_reference_style', { query, limit });
+		const { value: results, hit } = await ctx.plugin.researchCache.getOrFetch(cacheKey, async () => {
+			const value = await ctx.plugin.referenceReportsIndex.search(query, limit);
+			return { value, sourceFiles: [...new Set(value.map((r) => r.sourcePath))] };
+		});
 		return {
 			output: {
 				warning: 'Every result below is from a closed, past engagement. It may inform WORDING and STRUCTURE only. Do not copy or infer any fact, finding, date, or rating from it, and never cite it in a conclusion.',
@@ -31,7 +36,7 @@ export const searchReferenceStyleTool: AgentTool = {
 				...(results.length === 0 ? { hint: 'No stylistic precedent found — write directly from the requirement and current evidence.' } : {}),
 				reminder: 'Before writing or changing a conclusion or rating, verify the CURRENT status with search_documents against "evidence" and/or "interviewEvidence" (and get_session_plan) — this is required and checked before propose_control_changes will accept a conclusion/rating change.',
 			},
-			summary: `${results.length} style reference${results.length === 1 ? '' : 's'} found (not evidence)`,
+			summary: `${results.length} style reference${results.length === 1 ? '' : 's'} found (not evidence)${hit ? ' (cached)' : ''}`,
 		};
 	},
 };

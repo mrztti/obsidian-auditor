@@ -4,7 +4,8 @@ import { renderChatMarkdownInto } from '../markdown';
 import { ChatAgent } from './agent';
 import type { DraftQueueItem, DraftStage } from './draftQueue';
 import { renderProposalCard, type ProposalCardHandle } from './proposalCard';
-import type { AgentEvent, AgentHost, AgentPlan, ApplyOutcome, ApprovalDecision, PlanStepStatus, ReviewProposal } from './types';
+import type { AgentEvent, AgentHost, AgentPlan, ApplyOutcome, ApprovalDecision, ContextUsageSnapshot, ErrorRecoverySnapshot, ExecutionDecision, ExecutionSnapshot, PlanStepStatus, ReviewProposal } from './types';
+import { formatTokens as formatTokensCompact, formatUsageLine, sumUsage, type StepUsage, type UsageTotals } from './usage';
 
 const STAGE_LABEL: Record<DraftStage, string> = { stage1: 'Stage 1', stage2: 'Stage 2' };
 
@@ -57,13 +58,21 @@ class RunView {
 	private lastPlan: AgentPlan | null = null;
 	private proposalHandle: ProposalCardHandle | null = null;
 	private pendingResolve: ((d: ApprovalDecision) => void) | null = null;
+	/** Resolves a currently-shown checkpoint/error-recovery pause card — see `showPause`. */
+	private pendingPauseResolve: ((d: ExecutionDecision) => void) | null = null;
 	private toolCount = 0;
+	/** One cost/token badge per plan step id, refreshed in place by `updateUsage` so a usage tick never needs a full plan re-render. */
+	private stepUsageEls = new Map<string, HTMLElement>();
+	private runTotalEl: HTMLElement | null = null;
+	/** Context-window usage badge (FR-6.2) — lives in the run header since context events can arrive before any plan exists. */
+	private contextEl: HTMLElement;
 
 	constructor(parent: HTMLElement, private plugin: AuditorPlugin, onStop: () => void, private scroll: () => void) {
 		this.root = parent.createDiv('auditor-chat-message auditor-chat-message-assistant auditor-run');
 		const header = this.root.createDiv('auditor-run-header');
 		setIcon(header.createSpan('auditor-run-spinner'), 'loader-2');
 		this.statusEl = header.createSpan({ text: 'Thinking…', cls: 'auditor-run-status' });
+		this.contextEl = header.createSpan({ cls: 'auditor-context-badge auditor-agent-hidden' });
 		this.stopBtn = header.createEl('button', { text: 'Stop', cls: 'auditor-run-stop' });
 		this.stopBtn.addEventListener('click', onStop);
 		this.planEl = this.root.createDiv('auditor-plan auditor-agent-hidden');
@@ -91,11 +100,13 @@ class RunView {
 		const finished = plan.steps.filter((s) => s.status !== 'pending' && s.status !== 'in_progress').length;
 		head.createSpan({ text: `${finished}/${plan.steps.length}`, cls: 'auditor-plan-count' });
 		if (revised) head.createSpan({ text: 'revised', cls: 'auditor-plan-revised' });
+		this.runTotalEl = head.createSpan({ cls: 'auditor-plan-usage-total auditor-agent-hidden' });
 		if (plan.objective) this.planEl.createDiv({ text: plan.objective, cls: 'auditor-plan-objective' });
 
 		const bar = this.planEl.createDiv('auditor-plan-bar');
 		bar.createDiv('auditor-plan-bar-fill').setCssProps({ width: `${plan.steps.length ? Math.round((finished / plan.steps.length) * 100) : 0}%` });
 
+		this.stepUsageEls.clear();
 		const list = this.planEl.createEl('ol', { cls: 'auditor-plan-steps' });
 		for (const step of plan.steps) {
 			const isNew = previous !== null && !prevTitles.has(step.id);
@@ -103,8 +114,47 @@ class RunView {
 			setIcon(li.createSpan('auditor-plan-step-icon'), STEP_ICONS[step.status]);
 			li.createSpan({ text: step.title, cls: 'auditor-plan-step-title' });
 			if (step.burn) createBurnIcon(li, 'Burn Mode step — uses the boosted model');
+			const usageEl = li.createSpan({ cls: 'auditor-plan-step-usage auditor-agent-hidden' });
+			this.stepUsageEls.set(step.id, usageEl);
+			if (step.usage?.length) this.setStepUsageText(usageEl, sumUsage(step.usage));
 		}
 		this.scroll();
+	}
+
+	private setStepUsageText(el: HTMLElement, totals: UsageTotals, prefix = ''): void {
+		el.removeClass('auditor-agent-hidden');
+		el.setText(prefix + formatUsageLine(totals));
+	}
+
+	/** Called by the host on every `usage` event — refreshes just that step's badge plus the run total, without touching the rest of the plan DOM. */
+	updateUsage(stepId: string, _usage: StepUsage, runTotals: UsageTotals): void {
+		const stepEl = this.stepUsageEls.get(stepId);
+		if (stepEl) {
+			const step = this.lastPlan?.steps.find((s) => s.id === stepId);
+			this.setStepUsageText(stepEl, step?.usage?.length ? sumUsage(step.usage) : runTotals);
+		}
+		if (this.runTotalEl) this.setStepUsageText(this.runTotalEl, runTotals, 'Run: ');
+	}
+
+	/** Called on every `context` event (FR-6.2) — current/max tokens, % used, and a status-coloured badge. */
+	updateContext(usage: ContextUsageSnapshot): void {
+		this.contextEl.removeClass('auditor-agent-hidden');
+		this.contextEl.empty();
+		this.contextEl.removeClass('is-normal', 'is-approaching', 'is-compaction_required');
+		this.contextEl.addClass(`is-${usage.status}`);
+		const pct = Math.min(100, Math.max(0, usage.percentUsed));
+		const tokensText = `${formatTokensCompact(usage.currentTokens)}${usage.estimated ? '~' : ''} / ${formatTokensCompact(usage.maxTokens)}`;
+		this.contextEl.setText(`Context: ${tokensText} (${pct.toFixed(0)}%)`);
+		const label = usage.status === 'compaction_required' ? 'Compaction required' : usage.status === 'approaching' ? 'Approaching context limit' : 'Context usage normal';
+		this.contextEl.setAttr('aria-label', `${label}. Reserved: ${formatTokensCompact(usage.reservedTokens)}. Last compaction: ${usage.lastCompactionAt ? `step ${usage.lastCompactionStep}, ${usage.lastCompactionAt}` : 'never'}.`);
+	}
+
+	/** A passive note in the activity log (FR-6.4: "users can see compaction occurred without being interrupted") — never a modal or anything blocking. */
+	noteCompaction(beforeTokens: number, afterTokens: number, duplicatesRemoved: number, elided: number): void {
+		const parts = [`Compacted context: ~${formatTokensCompact(beforeTokens)} → ~${formatTokensCompact(afterTokens)} tokens`];
+		if (duplicatesRemoved > 0) parts.push(`${duplicatesRemoved} duplicate result${duplicatesRemoved === 1 ? '' : 's'} removed`);
+		if (elided > 0) parts.push(`${elided} large result${elided === 1 ? '' : 's'} condensed`);
+		this.addNote(parts.join(' — '));
 	}
 
 	addNote(text: string): void {
@@ -154,14 +204,81 @@ class RunView {
 		this.proposalHandle = null;
 	}
 
-	/** Resolves any proposal still awaiting review as rejected — used when the run is stopped or the chat is reset. */
+	/** Resolves any proposal still awaiting review as rejected, and any open checkpoint/error-recovery pause as "stop" — used when the run is stopped or the chat is reset. */
 	cancelPending(reason: string): void {
-		if (!this.pendingResolve) return;
-		const resolve = this.pendingResolve;
-		this.pendingResolve = null;
-		this.proposalHandle?.lock('Not applied');
-		this.proposalHandle = null;
-		resolve({ approved: [], rejected: [], feedback: reason });
+		if (this.pendingResolve) {
+			const resolve = this.pendingResolve;
+			this.pendingResolve = null;
+			this.proposalHandle?.lock('Not applied');
+			this.proposalHandle = null;
+			resolve({ approved: [], rejected: [], comments: {} });
+		}
+		if (this.pendingPauseResolve) {
+			const resolve = this.pendingPauseResolve;
+			this.pendingPauseResolve = null;
+			resolve('stop');
+		}
+	}
+
+	/**
+	 * Renders a single pause card — used for both the routine checkpoint (FR-4.1) and
+	 * error-recovery (FR-4.2) prompts, which only differ in heading/body copy and whether an
+	 * attempt count is shown. The card stays in place once decided (no separate "applied" step):
+	 * it just locks and shows which choice was made.
+	 */
+	private showPause(heading: string, body: string, snapshot: ExecutionSnapshot, attempt?: number): Promise<ExecutionDecision> {
+		this.setStatus('Waiting for your decision…');
+		return new Promise((resolve) => {
+			this.pendingPauseResolve = resolve;
+			const card = this.root.createDiv('auditor-pause-card');
+			const head = card.createDiv('auditor-pause-head');
+			setIcon(head.createSpan('auditor-pause-icon'), 'pause-circle');
+			head.createSpan({ text: heading, cls: 'auditor-pause-heading' });
+			card.createEl('p', { text: body, cls: 'auditor-pause-body' });
+
+			const stats = card.createDiv('auditor-pause-stats');
+			stats.createSpan({ text: `${snapshot.completed} completed`, cls: 'auditor-pause-stat' });
+			stats.createSpan({ text: `${snapshot.pending} pending`, cls: 'auditor-pause-stat' });
+			if (snapshot.failed > 0) stats.createSpan({ text: `${snapshot.failed} failed`, cls: 'auditor-pause-stat' });
+			if (snapshot.skipped > 0) stats.createSpan({ text: `${snapshot.skipped} skipped`, cls: 'auditor-pause-stat' });
+			if (attempt !== undefined) stats.createSpan({ text: `attempt ${attempt}`, cls: 'auditor-pause-stat' });
+
+			card.createDiv({ text: `Run so far: ${formatUsageLine(snapshot.runTotals)}`, cls: 'auditor-pause-usage' });
+			card.createDiv({ text: `Session: ${formatUsageLine(snapshot.sessionTotals)}`, cls: 'auditor-pause-usage' });
+
+			const buttons = card.createDiv('auditor-pause-buttons');
+			const continueBtn = buttons.createEl('button', { text: 'Continue', cls: 'mod-cta' });
+			const stopBtn = buttons.createEl('button', { text: 'Stop' });
+			const settle = (decision: ExecutionDecision) => {
+				this.pendingPauseResolve = null;
+				continueBtn.disabled = true;
+				stopBtn.disabled = true;
+				card.addClass('is-settled');
+				card.createDiv({ text: decision === 'continue' ? 'Continuing…' : 'Stopped.', cls: 'auditor-pause-outcome' });
+				this.setStatus(decision === 'continue' ? 'Continuing…' : 'Stopped');
+				resolve(decision);
+			};
+			continueBtn.addEventListener('click', () => settle('continue'));
+			stopBtn.addEventListener('click', () => settle('stop'));
+			this.scroll();
+		});
+	}
+
+	showCheckpoint(info: ExecutionSnapshot): Promise<ExecutionDecision> {
+		return this.showPause(
+			'Checkpoint reached',
+			'The agent has been working for a while. Nothing is lost either way — continuing picks up from the next pending step, stopping ends the run cleanly with everything reached so far kept.',
+			info,
+		);
+	}
+
+	showErrorRecovery(info: ErrorRecoverySnapshot): Promise<ExecutionDecision> {
+		return this.showPause(
+			'Model temporarily unavailable',
+			'The model is temporarily unavailable — this can happen during high demand and usually clears up shortly. Your progress so far is saved. Continuing retries only the step that failed.',
+			info,
+			info.attempt,
+		);
 	}
 
 	/** Makes the plan card tell the truth once the run is over: nothing keeps spinning, and steps the agent never got to are shown as such. */
@@ -211,6 +328,8 @@ export class ChatPanel {
 	private queueEl!: HTMLElement;
 	private queueLaunchBtn!: HTMLButtonElement;
 	private unsubscribeQueue: () => void;
+	/** Cumulative token/cost total for the whole chat session (every run since the last "New chat"), shown in the toolbar — see `usage.ts`. */
+	private sessionTotalEl!: HTMLElement;
 	/** "Burn Mode": while on, plan steps the agent itself marks quality-sensitive (QA, planning, drafting) use the boosted model from settings instead of the regular one. Per-chat UI state, not persisted. */
 	private burnModeEnabled = false;
 
@@ -224,6 +343,8 @@ export class ChatPanel {
 	private render(): void {
 		const bar = this.container.createDiv('auditor-chat-toolbar');
 		bar.createSpan({ text: 'Agent', cls: 'auditor-chat-toolbar-title' });
+		this.sessionTotalEl = bar.createSpan({ cls: 'auditor-chat-session-usage auditor-agent-hidden' });
+		this.sessionTotalEl.setAttr('aria-label', 'Estimated token usage and cost for this chat session, from the configured per-token prices in settings');
 		const newChat = bar.createEl('button', { text: 'New chat', cls: 'auditor-chat-new' });
 		newChat.addEventListener('click', () => this.resetChat());
 
@@ -362,6 +483,7 @@ export class ChatPanel {
 		this.currentRun = null;
 		this.messagesEl.empty();
 		this.renderEmptyState();
+		this.sessionTotalEl.addClass('auditor-agent-hidden');
 	}
 
 	private scrollToBottom = (): void => {
@@ -411,10 +533,19 @@ export class ChatPanel {
 				else if (event.type === 'note') run.addNote(event.text);
 				else if (event.type === 'tool_start') run.toolStart(event.id, event.label, event.burn);
 				else if (event.type === 'tool_end') run.toolEnd(event.id, event.ok, event.summary);
+				else if (event.type === 'usage') {
+					run.updateUsage(event.stepId, event.usage, event.runTotals);
+					this.sessionTotalEl.removeClass('auditor-agent-hidden');
+					this.sessionTotalEl.setText(`Session: ${formatUsageLine(event.sessionTotals)}`);
+				}
+				else if (event.type === 'context') run.updateContext(event.usage);
+				else if (event.type === 'compaction') run.noteCompaction(event.beforeTokens, event.afterTokens, event.duplicatesRemoved, event.elided);
 				else run.finish(event);
 			},
 			requestApproval: (proposal) => run.showProposal(proposal),
 			reportApplied: (outcomes) => run.showApplied(outcomes),
+			requestCheckpoint: (info) => run.showCheckpoint(info),
+			requestErrorRecovery: (info) => run.showErrorRecovery(info),
 		};
 		await this.agent.run(text, host, () => this.burnModeEnabled);
 		if (this.currentRun === run) this.currentRun = null;

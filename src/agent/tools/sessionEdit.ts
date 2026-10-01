@@ -61,7 +61,7 @@ export const proposeSessionPlanChangesTool: AgentTool = {
 		if (!decision.approved.includes(session)) {
 			ctx.host.reportApplied([]);
 			return {
-				output: { saved: false, rejectedByUser: true, ...(decision.feedback ? { userFeedback: decision.feedback } : {}), nextStep: 'Nothing was saved. Address the feedback and propose again, or explain to the user.' },
+				output: { saved: false, rejectedByUser: true, ...(decision.comments[session] ? { userFeedback: decision.comments[session] } : {}), nextStep: 'Nothing was saved. Address the feedback and propose again, or explain to the user.' },
 				summary: 'Plan changes rejected',
 			};
 		}

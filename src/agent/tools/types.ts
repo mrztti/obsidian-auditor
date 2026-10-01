@@ -3,6 +3,7 @@ import type AuditorPlugin from '../../main';
 import type { ControlStore } from '../controlStore';
 import type { SessionPlanStore } from '../sessionPlanStore';
 import type { AgentHost, AgentPlan, DraftStage } from '../types';
+import type { StepUsage } from '../usage';
 
 export interface ToolContext {
 	plugin: AuditorPlugin;
@@ -14,11 +15,27 @@ export interface ToolContext {
 	/** Whether this run has looked at any *current* evidence (the "evidence" or "interviewEvidence" indexes, or a session plan's captured results) — as opposed to reference reports, which are style-only. Checked before a conclusion/rating change is allowed to be proposed. */
 	hasCurrentEvidence(): boolean;
 	markCurrentEvidence(): void;
-	/** Whether `qa_review_conclusion` has passed for this exact (control, stage) in this run — required before propose_control_changes accepts a change to that stage's conclusion/rating. */
+	/** Whether `qa_review_conclusion` (or `qa_review_conclusions_batch`) has passed for this exact (control, stage) in this run — required before propose_control_changes accepts a change to that stage's conclusion/rating. */
 	hasQaReview(controlNumber: string, stage: DraftStage): boolean;
 	markQaReview(controlNumber: string, stage: DraftStage): void;
-	/** Whether Burn Mode (the boosted model) is active for the step currently in progress — a tool that produces a reviewable proposal tags it with this, so the UI can frame it accordingly. */
+	/** Whether Burn Mode (the boosted model) is active for the step currently in progress — a tool that produces a reviewable proposal tags it with this, so the UI can frame it accordingly. Also decides which price tier `recordUsage` bills a tool's own model call at. */
 	isBurnActive(): boolean;
+	/**
+	 * Records usage for a model call a TOOL made itself (e.g. `prepare_control_conclusion`'s own
+	 * drafting call) — same accounting as the agent's own turns (attributed to the current plan
+	 * step, tiered by Burn Mode, added to the run/session totals, and surfaced as a `usage` event),
+	 * just invoked from inside a tool instead of the main loop. Returns the computed record so the
+	 * tool can echo it back to the model (see `PreparedConclusion.usage`).
+	 */
+	recordUsage(meta: { promptTokenCount?: number; cachedContentTokenCount?: number; candidatesTokenCount?: number } | undefined): StepUsage;
+	/**
+	 * Wraps a tool's own model call (e.g. the Gemini request inside `prepare_control_conclusion`)
+	 * with the same bounded-backoff-then-ask-the-user recovery a transient provider-capacity error
+	 * gets in the main loop (FR-4.2) — so a tool-initiated call is just as resilient as the agent's
+	 * own turns, without each tool reimplementing retry logic. Rejects normally for anything that
+	 * isn't a retryable provider error, or if the user chooses to stop when asked.
+	 */
+	callWithRecovery<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 export interface ToolResult {

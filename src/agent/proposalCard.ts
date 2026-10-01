@@ -96,14 +96,32 @@ function renderField(card: HTMLElement, entry: DiffEntry): void {
 	});
 }
 
-function renderItem(parent: HTMLElement, item: ReviewItem): { checkbox: HTMLInputElement; badge: HTMLElement; link: HTMLElement | null } {
+type ItemDecision = 'accepted' | 'rejected' | null;
+
+interface ItemHandle {
+	item: ReviewItem;
+	getDecision(): ItemDecision;
+	getComment(): string;
+	/** Used by the container's "Accept all"/"Reject all" — a no-op once the item is locked. */
+	setDecision(next: ItemDecision): void;
+	badge: HTMLElement;
+	link: HTMLElement | null;
+	lockInputs(): void;
+}
+
+/**
+ * One reviewable item (a control, a control+stage pair, or a whole session plan) as its own
+ * self-contained card: diffs, an explicit Accept/Reject pair (no decision is pre-selected — the
+ * user must choose), and its own comment box. A rejection requires a non-empty comment before the
+ * container's "Submit review" will accept it, since a reject with nothing to act on gives the
+ * agent's refinement pass nothing to go on; a comment on an acceptance is always optional.
+ */
+function renderItem(parent: HTMLElement, item: ReviewItem, onDecisionChange: () => void): ItemHandle {
 	const card = parent.createDiv('auditor-proposal-change');
 	const head = card.createDiv('auditor-proposal-change-head');
-	const label = head.createEl('label', { cls: 'auditor-proposal-check' });
-	const checkbox = label.createEl('input', { type: 'checkbox' });
-	checkbox.checked = true;
-	label.createSpan({ text: item.title, cls: 'auditor-proposal-number' });
-	if (item.subtitle) label.createSpan({ text: item.subtitle, cls: 'auditor-proposal-topic' });
+	const titleWrap = head.createDiv('auditor-proposal-change-title');
+	titleWrap.createSpan({ text: item.title, cls: 'auditor-proposal-number' });
+	if (item.subtitle) titleWrap.createSpan({ text: item.subtitle, cls: 'auditor-proposal-topic' });
 	const { open } = item;
 	let link: HTMLElement | null = null;
 	if (open) {
@@ -116,7 +134,58 @@ function renderItem(parent: HTMLElement, item: ReviewItem): { checkbox: HTMLInpu
 	const badge = head.createSpan('auditor-proposal-badge');
 
 	for (const entry of item.entries) renderField(card, entry);
-	return { checkbox, badge, link };
+
+	const decisionRow = card.createDiv('auditor-proposal-decision-row');
+	const acceptBtn = decisionRow.createEl('button', { text: 'Accept', cls: 'auditor-proposal-accept' });
+	const rejectBtn = decisionRow.createEl('button', { text: 'Reject', cls: 'auditor-proposal-reject' });
+	const statusSpan = decisionRow.createSpan({ text: 'Not yet decided', cls: 'auditor-proposal-decision-status' });
+
+	const commentWrap = card.createDiv('auditor-proposal-comment-wrap auditor-agent-hidden');
+	commentWrap.createEl('label', { text: 'Comment', cls: 'auditor-proposal-field-label' });
+	const comment = commentWrap.createEl('textarea', { cls: 'auditor-pipeline-textarea auditor-proposal-item-comment' });
+	comment.rows = 2;
+	const commentHint = commentWrap.createEl('p', { cls: 'auditor-field-description' });
+
+	let decision: ItemDecision = null;
+	let locked = false;
+
+	const refreshDecisionUi = () => {
+		acceptBtn.toggleClass('is-selected', decision === 'accepted');
+		rejectBtn.toggleClass('is-selected', decision === 'rejected');
+		statusSpan.setText(decision === 'accepted' ? 'Accepted' : decision === 'rejected' ? 'Rejected' : 'Not yet decided');
+		commentWrap.toggleClass('auditor-agent-hidden', decision === null);
+		commentHint.setText(decision === 'rejected' ? 'Required: tell the agent what to change.' : 'Optional note.');
+		comment.placeholder = decision === 'rejected' ? 'What should change?' : 'Optional note for the agent…';
+	};
+	refreshDecisionUi();
+
+	/** Sets the decision outright (used by the "Accept all"/"Reject all" bulk actions). */
+	const setDecision = (next: ItemDecision) => {
+		if (locked) return;
+		decision = next;
+		refreshDecisionUi();
+		onDecisionChange();
+	};
+	/** A button click toggles: clicking the already-selected choice clears back to undecided. */
+	const toggleDecision = (next: ItemDecision) => setDecision(decision === next ? null : next);
+	acceptBtn.addEventListener('click', () => toggleDecision('accepted'));
+	rejectBtn.addEventListener('click', () => toggleDecision('rejected'));
+	comment.addEventListener('input', onDecisionChange);
+
+	return {
+		item,
+		getDecision: () => decision,
+		getComment: () => comment.value.trim(),
+		setDecision,
+		badge,
+		link,
+		lockInputs: () => {
+			locked = true;
+			acceptBtn.disabled = true;
+			rejectBtn.disabled = true;
+			comment.disabled = true;
+		},
+	};
 }
 
 export interface ProposalCardHandle {
@@ -126,7 +195,7 @@ export interface ProposalCardHandle {
 	lock(text: string): void;
 }
 
-/** Renders the proposed control changes as per-control diffs with approve/reject controls; resolves `decide` once the user chooses. */
+/** Renders the proposed changes as independently-decided items with a single bulk "Submit review" — resolves `decide` once the user has made an explicit choice for every item and submits. */
 export function renderProposalCard(
 	parent: HTMLElement,
 	proposal: ReviewProposal,
@@ -142,15 +211,24 @@ export function renderProposalCard(
 	const headingEl = header.createSpan({ text: proposal.heading, cls: 'auditor-proposal-heading' });
 	if (proposal.summary) card.createEl('p', { text: proposal.summary, cls: 'auditor-proposal-summary' });
 
-	const rows = proposal.items.map((item) => ({ item, ...renderItem(card, item) }));
-
+	const rows = proposal.items.map((item) => item); // keep order
 	const footer = card.createDiv('auditor-proposal-footer');
-	const feedback = footer.createEl('textarea', { cls: 'auditor-pipeline-textarea auditor-proposal-feedback' });
-	feedback.rows = 2;
-	feedback.placeholder = 'Optional: tell the agent what to change if you reject something…';
-	const buttons = footer.createDiv('auditor-proposal-buttons');
-	const applyBtn = buttons.createEl('button', { text: 'Apply selected', cls: 'mod-cta' });
-	const rejectBtn = buttons.createEl('button', { text: 'Reject all' });
+	const bulkButtons = footer.createDiv('auditor-proposal-bulk-buttons');
+	const acceptAllBtn = bulkButtons.createEl('button', { text: 'Accept all' });
+	const rejectAllBtn = bulkButtons.createEl('button', { text: 'Reject all' });
+	const submitRow = footer.createDiv('auditor-proposal-submit-row');
+	const submitHint = submitRow.createSpan({ cls: 'auditor-proposal-submit-hint' });
+	const submitBtn = submitRow.createEl('button', { text: 'Submit review', cls: 'mod-cta' });
+
+	const handles: ItemHandle[] = rows.map((item) => renderItem(card, item, () => updateSubmitState()));
+
+	// Only sets items still undecided (or already matching), never overwrites a choice the user made explicitly on one item — a bulk action is a starting point, not a silent overwrite of hand-picked decisions.
+	acceptAllBtn.addEventListener('click', () => {
+		for (const h of handles) if (h.getDecision() === null) h.setDecision('accepted');
+	});
+	rejectAllBtn.addEventListener('click', () => {
+		for (const h of handles) if (h.getDecision() === null) h.setDecision('rejected');
+	});
 
 	/** Once decided, the card shrinks to one line per object (name, status, link) to cut clutter; "Show changes" brings the diffs back. */
 	const collapse = (heading: string) => {
@@ -167,34 +245,45 @@ export function renderProposalCard(
 	let settled = false;
 	const lockInputs = () => {
 		settled = true;
-		for (const r of rows) r.checkbox.disabled = true;
-		feedback.disabled = true;
-		applyBtn.disabled = true;
-		rejectBtn.disabled = true;
+		for (const h of handles) h.lockInputs();
+		submitBtn.disabled = true;
+		acceptAllBtn.disabled = true;
+		rejectAllBtn.disabled = true;
 	};
-	const submit = (approvedNumbers: string[]) => {
+
+	function updateSubmitState(): void {
 		if (settled) return;
+		const undecided = handles.filter((h) => h.getDecision() === null).length;
+		const rejectedWithoutComment = handles.filter((h) => h.getDecision() === 'rejected' && h.getComment() === '').length;
+		const ready = undecided === 0 && rejectedWithoutComment === 0;
+		submitBtn.disabled = !ready;
+		submitHint.setText(
+			undecided > 0
+				? `${undecided} item${undecided === 1 ? '' : 's'} not yet decided`
+				: rejectedWithoutComment > 0
+					? `${rejectedWithoutComment} rejection${rejectedWithoutComment === 1 ? '' : 's'} need a comment`
+					: '',
+		);
+	}
+	updateSubmitState();
+
+	submitBtn.addEventListener('click', () => {
+		if (settled || submitBtn.disabled) return;
 		lockInputs();
-		decide({
-			approved: approvedNumbers,
-			rejected: rows.map((r) => r.item.key).filter((n) => !approvedNumbers.includes(n)),
-			feedback: feedback.value.trim(),
-		});
-	};
-	const updateApplyLabel = () => {
-		const n = rows.filter((r) => r.checkbox.checked).length;
-		applyBtn.setText(n === rows.length ? 'Apply all' : `Apply ${n} selected`);
-		applyBtn.disabled = n === 0;
-	};
-	for (const r of rows) r.checkbox.addEventListener('change', updateApplyLabel);
-	updateApplyLabel();
-	applyBtn.addEventListener('click', () => submit(rows.filter((r) => r.checkbox.checked).map((r) => r.item.key)));
-	rejectBtn.addEventListener('click', () => submit([]));
+		const approved = handles.filter((h) => h.getDecision() === 'accepted').map((h) => h.item.key);
+		const rejected = handles.filter((h) => h.getDecision() === 'rejected').map((h) => h.item.key);
+		const comments: Record<string, string> = {};
+		for (const h of handles) {
+			const c = h.getComment();
+			if (c) comments[h.item.key] = c;
+		}
+		decide({ approved, rejected, comments });
+	});
 
 	return {
 		showOutcomes(outcomes) {
 			const byNumber = new Map(outcomes.map((o) => [o.key, o]));
-			for (const r of rows) {
+			for (const r of handles) {
 				const outcome = byNumber.get(r.item.key);
 				r.badge.empty();
 				if (!outcome) {
@@ -214,11 +303,11 @@ export function renderProposalCard(
 			}
 			footer.addClass('auditor-agent-hidden');
 			const saved = outcomes.filter((o) => o.ok).length;
-			collapse(saved > 0 ? `Changes applied (${saved} of ${rows.length})` : 'No changes applied');
+			collapse(saved > 0 ? `Changes applied (${saved} of ${handles.length})` : 'No changes applied');
 		},
 		lock(text) {
 			lockInputs();
-			for (const r of rows) { r.badge.setText(text); r.badge.addClass('is-rejected'); r.link?.addClass('auditor-agent-hidden'); }
+			for (const r of handles) { r.badge.setText(text); r.badge.addClass('is-rejected'); r.link?.addClass('auditor-agent-hidden'); }
 			footer.addClass('auditor-agent-hidden');
 			collapse('No changes applied');
 		},

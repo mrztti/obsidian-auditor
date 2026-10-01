@@ -1,5 +1,6 @@
 import type { TFile } from 'obsidian';
 import type { ControlRecord } from '../controlNote';
+import type { StepUsage, UsageTotals } from './usage';
 
 export type PlanStepStatus = 'pending' | 'in_progress' | 'done' | 'skipped' | 'failed';
 
@@ -9,6 +10,8 @@ export interface PlanStep {
 	status: PlanStepStatus;
 	/** "Burn Mode": the agent's own judgment that this step is quality-sensitive enough (QA, planning, drafting a conclusion) to warrant the boosted model — used only while the current step is `in_progress`, only when the user has switched Burn Mode on in the chat, and only when a boosted model is actually configured. */
 	burn?: boolean;
+	/** Every model call attributed to this step (one per completed call, retries included as separate entries) — see `StepUsage`. Absent until the first call lands while this step is current. */
+	usage?: StepUsage[];
 }
 
 /** The agent's working plan — rewritten by the model via `update_plan` and mirrored live in the chat UI. */
@@ -107,8 +110,12 @@ export interface ReviewProposal {
 export interface ApprovalDecision {
 	approved: string[];
 	rejected: string[];
-	/** Free-text guidance the user typed when rejecting, passed back to the agent. */
-	feedback: string;
+	/**
+	 * Per-item (`ReviewItem.key`) comment — required by the review UI for every rejected item (so a
+	 * refinement pass always has something concrete to act on), optional for an accepted one. A key
+	 * with no comment is simply absent, not an empty string.
+	 */
+	comments: Record<string, string>;
 }
 
 export interface ApplyOutcome {
@@ -117,11 +124,66 @@ export interface ApplyOutcome {
 	error?: string;
 }
 
+/**
+ * A snapshot of where a run currently stands — shown whenever execution pauses for the user,
+ * whether that's a routine checkpoint (FR-4.1) or recovering from a provider error (FR-4.2).
+ * Nothing it describes is reconstructed after the fact: it is read directly off the plan and the
+ * usage totals already being tracked live, so what's shown is exactly the state execution resumes
+ * from — no step here is re-run, no evidence/draft/QA result is regenerated, by continuing.
+ */
+export interface ExecutionSnapshot {
+	completed: number;
+	pending: number;
+	failed: number;
+	skipped: number;
+	runTotals: UsageTotals;
+	sessionTotals: UsageTotals;
+}
+
+/** `ExecutionSnapshot` plus which automatic-retry attempt this is — see `AgentHost.requestErrorRecovery`. */
+export interface ErrorRecoverySnapshot extends ExecutionSnapshot {
+	attempt: number;
+}
+
+export type ExecutionDecision = 'continue' | 'stop';
+
+export type ContextStatus = 'normal' | 'approaching' | 'compaction_required';
+
+/**
+ * Where the active context stands against the configured base-model budget (FR-6.2). `currentTokens`
+ * is the real `promptTokenCount` Gemini reported for the most recent call when available (the
+ * authoritative number), or a character-based estimate right after a compaction pass, before the
+ * next real call confirms it.
+ */
+export interface ContextUsageSnapshot {
+	currentTokens: number;
+	/** Whether `currentTokens` is the real figure from the provider or a character-based estimate (only true briefly, right after a compaction, until the next model call confirms the real count). */
+	estimated: boolean;
+	maxTokens: number;
+	/** `maxTokens` minus the reserved output and system/tool budgets — what `currentTokens` is actually measured against. */
+	usableInputBudget: number;
+	reservedTokens: number;
+	percentUsed: number;
+	status: ContextStatus;
+	lastCompactionAt: string | null;
+	lastCompactionStep: number | null;
+}
+
+export type ContextScope = 'run' | 'session';
+
+export type AgentContextEvent =
+	| { type: 'context'; scope: ContextScope; usage: ContextUsageSnapshot }
+	/** Fired once per compaction pass, in addition to the plain `context` update — the before/after token estimate the UI shows as a passive note (FR-6.4's "users can see compaction occurred without being interrupted"). */
+	| { type: 'compaction'; beforeTokens: number; afterTokens: number; duplicatesRemoved: number; elided: number };
+
 export type AgentEvent =
 	| { type: 'plan'; plan: AgentPlan }
 	| { type: 'note'; text: string }
 	| { type: 'tool_start'; id: number; name: string; label: string; burn: boolean }
 	| { type: 'tool_end'; id: number; ok: boolean; summary: string }
+	/** Emitted right after each completed model call, with that call's own usage plus running totals for the current run and the whole chat session — see `usage.ts`. */
+	| { type: 'usage'; stepId: string; usage: StepUsage; runTotals: UsageTotals; sessionTotals: UsageTotals }
+	| AgentContextEvent
 	| { type: 'final'; text: string; askedUser: boolean; burn: boolean }
 	| { type: 'error'; message: string };
 
@@ -131,4 +193,20 @@ export interface AgentHost {
 	requestApproval(proposal: ReviewProposal): Promise<ApprovalDecision>;
 	/** Called after approved changes were written, so the UI can mark the proposal as applied. */
 	reportApplied(outcomes: ApplyOutcome[]): void;
+	/**
+	 * Routine execution checkpoint (FR-4.1): fired every `CHECKPOINT_INTERVAL` completed steps
+	 * instead of the run simply being cut off. The run is genuinely paused here — history, plan,
+	 * QA/evidence state and usage totals are all untouched and still in scope — resolving
+	 * `'continue'` picks the very next pending step back up; `'stop'` ends the run cleanly (not as
+	 * an error) with everything reached so far left exactly as it is.
+	 */
+	requestCheckpoint(info: ExecutionSnapshot): Promise<ExecutionDecision>;
+	/**
+	 * Fired when a model call fails with a retryable provider-capacity error (FR-4.2) after its
+	 * bounded automatic backoff has already been exhausted. Shown only in plain terms (the model is
+	 * temporarily unavailable) — never the raw provider error. `'continue'` retries only the one
+	 * failed call; everything completed earlier (evidence, drafts, QA results, usage totals) is
+	 * untouched. `'stop'` ends the run cleanly.
+	 */
+	requestErrorRecovery(info: ErrorRecoverySnapshot): Promise<ExecutionDecision>;
 }

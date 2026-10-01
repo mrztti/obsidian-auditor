@@ -1611,6 +1611,15 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	white-space: nowrap;
 }
 
+/* Context-window usage badge (FR-6.2) — text-colour only, no border, so it reads as a quiet status line rather than a loud "AI" callout. */
+.auditor-context-badge {
+	font-size: 0.72em;
+	white-space: nowrap;
+	color: var(--text-faint);
+}
+.auditor-context-badge.is-approaching { color: var(--color-orange); }
+.auditor-context-badge.is-compaction_required { color: var(--text-error); }
+
 .auditor-run-spinner,
 .auditor-activity-row.is-running .auditor-activity-icon,
 .auditor-plan-step.is-in_progress .auditor-plan-step-icon {
@@ -1629,6 +1638,65 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 .auditor-run-error {
 	color: var(--text-error);
 	font-size: 0.9em;
+}
+
+/* Checkpoint / error-recovery pause card — see src/agent/chatPanel.ts RunView.showPause. Deliberately plain (neutral border, no accent/gradient): it's a routine pause, not something that needs to read as special. */
+
+.auditor-pause-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 10px 12px;
+	background: var(--background-primary);
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.auditor-pause-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 600;
+}
+
+.auditor-pause-body {
+	margin: 0;
+	color: var(--text-muted);
+	font-size: 0.9em;
+}
+
+.auditor-pause-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.auditor-pause-stat {
+	font-size: 0.75em;
+	padding: 1px 8px;
+	border-radius: 8px;
+	background: var(--background-secondary);
+	color: var(--text-muted);
+}
+
+.auditor-pause-usage {
+	font-size: 0.78em;
+	color: var(--text-faint);
+}
+
+.auditor-pause-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.auditor-pause-outcome {
+	color: var(--text-muted);
+	font-size: 0.85em;
+}
+
+.auditor-pause-card.is-settled {
+	opacity: 0.8;
 }
 
 @keyframes auditor-spin {
@@ -1728,6 +1796,30 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	to { background: transparent; }
 }
 
+/* Per-step and per-run token/cost estimate badges — see src/agent/usage.ts. */
+.auditor-plan-usage-total {
+	margin-left: auto;
+	color: var(--text-faint);
+	font-weight: 400;
+	font-size: 0.75em;
+	white-space: nowrap;
+}
+
+.auditor-plan-step-usage {
+	margin-left: auto;
+	padding-left: 8px;
+	color: var(--text-faint);
+	font-size: 0.8em;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.auditor-chat-session-usage {
+	color: var(--text-faint);
+	font-size: 0.78em;
+	white-space: nowrap;
+}
+
 .auditor-activity-list {
 	display: flex;
 	flex-direction: column;
@@ -1760,7 +1852,7 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 /* Proposed changes / diffs */
 
 .auditor-proposal {
-	border: 1px solid var(--interactive-accent);
+	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	padding: 10px 12px;
 	background: var(--background-primary);
@@ -1801,6 +1893,14 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	display: flex;
 	align-items: center;
 	gap: 6px;
+	flex: 1;
+	min-width: 0;
+}
+
+.auditor-proposal-change-title {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
 	flex: 1;
 	min-width: 0;
 }
@@ -1914,14 +2014,74 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 
 .auditor-proposal-footer {
 	display: flex;
-	flex-direction: column;
-	gap: 8px;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
 }
 
 .auditor-proposal-buttons {
 	display: flex;
 	justify-content: flex-end;
 	gap: 8px;
+}
+
+.auditor-proposal-bulk-buttons {
+	display: flex;
+	gap: 6px;
+}
+
+.auditor-proposal-submit-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-left: auto;
+}
+
+.auditor-proposal-submit-hint {
+	color: var(--text-muted);
+	font-size: 0.8em;
+}
+
+/* Per-item explicit Accept/Reject + comment — see src/agent/proposalCard.ts. */
+
+.auditor-proposal-decision-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.auditor-proposal-decision-status {
+	margin-left: 4px;
+	font-size: 0.8em;
+	color: var(--text-muted);
+}
+
+.auditor-proposal-accept,
+.auditor-proposal-reject {
+	padding: 3px 12px;
+}
+
+.auditor-proposal-accept.is-selected {
+	background: var(--color-green);
+	color: var(--text-on-accent);
+	border-color: var(--color-green);
+}
+
+.auditor-proposal-reject.is-selected {
+	background: var(--text-error);
+	color: var(--text-on-accent);
+	border-color: var(--text-error);
+}
+
+.auditor-proposal-comment-wrap {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.auditor-proposal-item-comment {
+	min-height: 44px;
 }
 
 /* Chat as a standalone sidebar view */
@@ -1985,7 +2145,9 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 
 .auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-summary,
 .auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-field,
-.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-topic {
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-topic,
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-decision-row,
+.auditor-proposal.is-collapsed:not(.is-expanded) .auditor-proposal-comment-wrap {
 	display: none;
 }
 
@@ -2174,4 +2336,187 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 
 .auditor-proposal.auditor-burn-frame {
 	padding: 10px 12px;
+}
+
+/* ─── Rapid Fire workspace (Epic 8) ──────────────────────────────────── */
+
+.auditor-rapid-fire-view {
+	padding: 12px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	height: 100%;
+	overflow-y: auto;
+}
+
+.auditor-rf-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.auditor-rf-usage {
+	font-size: 0.8em;
+	color: var(--text-faint);
+	white-space: nowrap;
+}
+
+.auditor-rf-tabbar {
+	display: flex;
+	gap: 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: 4px;
+}
+
+.auditor-rf-tab-btn {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	padding: 4px 10px;
+	border-radius: 6px;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.auditor-rf-tab-btn.is-active {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+	font-weight: 600;
+}
+
+.auditor-rf-body {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.auditor-rf-controls-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.auditor-rf-status {
+	font-weight: 600;
+	margin-right: auto;
+}
+
+.auditor-rf-item-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.auditor-rf-item-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 8px;
+	border-radius: 6px;
+	background: var(--background-secondary);
+	font-size: 0.88em;
+}
+
+.auditor-rf-item-number { font-weight: 600; min-width: 90px; }
+.auditor-rf-item-stage { color: var(--text-muted); min-width: 60px; }
+
+.auditor-rf-item-state {
+	font-size: 0.78em;
+	padding: 1px 8px;
+	border-radius: 8px;
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+}
+.auditor-rf-item-state.is-accepted { color: var(--color-green); }
+.auditor-rf-item-state.is-blocked,
+.auditor-rf-item-state.is-qa_failed { color: var(--text-error); }
+.auditor-rf-item-state.is-ready_for_review { color: var(--color-orange); }
+
+.auditor-rf-batch-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.auditor-rf-fact-row {
+	padding: 4px 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.auditor-rf-filter-row {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.auditor-rf-review-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.auditor-rf-review-item {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.auditor-rf-review-item.is-focused {
+	border-color: var(--interactive-accent);
+}
+
+.auditor-rf-review-item-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.auditor-rf-qa-badge {
+	font-size: 0.75em;
+	padding: 1px 8px;
+	border-radius: 8px;
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+}
+.auditor-rf-qa-badge.is-pass { color: var(--color-green); }
+.auditor-rf-qa-badge.is-fail { color: var(--text-error); }
+
+.auditor-rf-review-text {
+	white-space: pre-wrap;
+	font-size: 0.9em;
+	line-height: 1.5;
+}
+
+.auditor-rf-review-footer {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+}
+
+.auditor-rf-export-list {
+	max-height: 160px;
+	overflow-y: auto;
+	font-size: 0.85em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 6px 10px;
+	margin-bottom: 8px;
+}
+
+.auditor-rf-pause-notice {
+	color: var(--color-orange);
+	font-size: 0.85em;
+	padding: 6px 10px;
+	border-radius: 6px;
+	background: var(--background-secondary);
 }

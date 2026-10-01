@@ -6,6 +6,8 @@ import {
 	type GenerateContentResponse,
 	type Schema,
 } from '@google/genai';
+import type { DraftStage } from './agent/types';
+import type { WritingStyleProfile } from './settings';
 
 export interface RerankedSnippet {
 	index: number;
@@ -282,6 +284,214 @@ const DRAFT_STAGE2_SCHEMA: Schema = {
 	required: ['toeConclusion', 'toeRating'],
 };
 
+/** One stage's output from `prepareControlConclusion` — the dedicated conclusion-drafting tool (FR-2.1). Unlike `DraftedControl`/`DraftedStage2`, gaps are surfaced explicitly rather than silently folded into the conclusion text. */
+export interface PreparedConclusionStage {
+	stage: DraftStage;
+	conclusionText: string;
+	rating: 'C' | 'C*' | 'NC';
+	/** What was taken as given because it was not explicit in the evidence provided. */
+	assumptions: string[];
+	/** Evidence gaps or open questions NOT resolved by what was given — never folded silently into "satisfied". */
+	unresolvedIssues: string[];
+}
+
+const PREPARED_CONCLUSION_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		stages: {
+			type: Type.ARRAY,
+			description: 'Exactly one entry per stage requested.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					stage: { type: Type.STRING, enum: ['stage1', 'stage2'] },
+					conclusionText: { type: Type.STRING, description: 'The full conclusion block for this stage, following the writing rules exactly.' },
+					rating: { type: Type.STRING, enum: ['C', 'C*', 'NC'], description: 'C = conform, no issues. C* = conform but with an observation/minor note. NC = non-conform, a recommendation is required.' },
+					assumptions: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'What was taken as given because it was not explicit in the evidence provided. Empty array if genuinely none.' },
+					unresolvedIssues: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Evidence gaps or open questions NOT resolved by what was given — never silently treated as satisfied. Empty array only if genuinely none.' },
+				},
+				required: ['stage', 'conclusionText', 'rating', 'assumptions', 'unresolvedIssues'],
+			},
+		},
+	},
+	required: ['stages'],
+};
+
+/** One item submitted to `qaReviewConclusionsBatch` — see `qa_review_conclusions_batch` (FR-3.2). */
+export interface QaBatchItemInput {
+	controlId: string;
+	stage: DraftStage;
+	conclusionText: string;
+	rating: string;
+	evidenceReferences: string[];
+}
+
+/** One item's result from `qaReviewConclusionsBatch`. */
+export interface QaBatchItemResult {
+	controlId: string;
+	stage: DraftStage;
+	pass: boolean;
+	correctedConclusionText: string;
+	correctedRating: string;
+	/** Specific issues found (evidence alignment, unsupported claims, structure, style, prohibited wording, reference correctness) — empty only if genuinely none. */
+	findings: string[];
+}
+
+const QA_BATCH_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		results: {
+			type: Type.ARRAY,
+			description: 'Exactly one entry per item reviewed, in the same order.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					controlId: { type: Type.STRING, description: 'Copied exactly from the item reviewed.' },
+					stage: { type: Type.STRING, enum: ['stage1', 'stage2'] },
+					pass: { type: Type.BOOLEAN },
+					correctedConclusionText: { type: Type.STRING, description: 'The conclusion text, corrected if anything needed to change — identical to the input text if nothing did. Never blank.' },
+					correctedRating: { type: Type.STRING, description: 'The rating, corrected if needed — identical to the input rating if nothing needed to change. Never blank.' },
+					findings: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Specific issues found. Empty array only if genuinely none.' },
+				},
+				required: ['controlId', 'stage', 'pass', 'correctedConclusionText', 'correctedRating', 'findings'],
+			},
+		},
+	},
+	required: ['results'],
+};
+
+// ─── Rapid Fire (Epic 8) ────────────────────────────────────────────────────
+
+export interface SimilarityBatchAssignment {
+	controlNumber: string;
+	batchLabel: string;
+	/** One sentence: why this control landed in this batch — kept for the "explanation" guardrail (FR-8.3), not just a label. */
+	reason: string;
+}
+
+export interface SimilarityBatchPlan {
+	thinking: string;
+	batchLabels: string[];
+	/** Terms genuinely shared by a batch's controls — explicitly NOT generic words like "documented"/"reviewed"/"approved" (guarded against in the prompt). */
+	sharedTermsByBatch: Record<string, string[]>;
+	assignments: SimilarityBatchAssignment[];
+}
+
+const SIMILARITY_BATCH_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		batchLabels: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Final, deduplicated set of topic-batch labels in use.' },
+		sharedTermsByBatch: {
+			type: Type.ARRAY,
+			description: 'One entry per batch label, listing the specific shared terms (framework section, technology, process, evidence type — never generic words like "documented"/"reviewed"/"approved") that justify grouping its controls.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					batchLabel: { type: Type.STRING },
+					terms: { type: Type.ARRAY, items: { type: Type.STRING } },
+				},
+				required: ['batchLabel', 'terms'],
+			},
+		},
+		assignments: {
+			type: Type.ARRAY,
+			description: 'Exactly one entry per control given.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					controlNumber: { type: Type.STRING },
+					batchLabel: { type: Type.STRING, description: 'One of batchLabels.' },
+					reason: { type: Type.STRING, description: 'One sentence: specifically why this control fits this batch (shared section/technology/process/evidence type) — never just "similar topic".' },
+				},
+				required: ['controlNumber', 'batchLabel', 'reason'],
+			},
+		},
+	},
+	required: ['batchLabels', 'sharedTermsByBatch', 'assignments'],
+};
+
+export interface ExtractedEvidenceFact {
+	text: string;
+	sourcePath: string;
+	location: string;
+	/** Every control number (from this batch) this fact actually supports — never assigned by topic similarity alone (FR-8.4's critical rule). */
+	controlNumbers: string[];
+	stages: DraftStage[];
+}
+
+export interface ThemeEvidenceExtraction {
+	thinking: string;
+	facts: ExtractedEvidenceFact[];
+	/** Per control number, anything the batch's retrieved evidence does NOT cover — carried into drafting as an honest gap, never silently dropped. */
+	unresolvedQuestions: string[];
+}
+
+const THEME_EVIDENCE_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		facts: {
+			type: Type.ARRAY,
+			description: 'Discrete evidence facts extracted from the retrieved snippets, each explicitly mapped to the control(s)/stage(s) it actually supports.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					text: { type: Type.STRING, description: 'The fact itself, concisely, in your own words — not a copy of the whole snippet.' },
+					sourcePath: { type: Type.STRING, description: 'Exact file path of the snippet this came from.' },
+					location: { type: Type.STRING, description: 'Page/line/section within that file, if given in the snippet label.' },
+					controlNumbers: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'ONLY controls (from this batch) this specific fact actually supports — never every control in the batch just because they share a topic.' },
+					stages: { type: Type.ARRAY, items: { type: Type.STRING, enum: ['stage1', 'stage2'] }, description: 'Which stage(s) this fact is relevant to.' },
+				},
+				required: ['text', 'sourcePath', 'location', 'controlNumbers', 'stages'],
+			},
+		},
+		unresolvedQuestions: {
+			type: Type.ARRAY,
+			items: { type: Type.STRING },
+			description: 'What this batch\'s controls need that the retrieved evidence does not cover — be specific, e.g. "C-4.2.1: no evidence found of the change-approval workflow". Empty array only if genuinely none.',
+		},
+	},
+	required: ['facts', 'unresolvedQuestions'],
+};
+
+export interface BatchDraftItemInput {
+	controlNumber: string;
+	stage: DraftStage;
+	controlText: string;
+	priorConclusion: string;
+}
+
+export interface BatchDraftItemResult {
+	controlNumber: string;
+	stage: DraftStage;
+	conclusionText: string;
+	rating: string;
+	assumptions: string[];
+	unresolvedIssues: string[];
+}
+
+const BATCH_DRAFT_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		results: {
+			type: Type.ARRAY,
+			description: 'Exactly one entry per requested (controlNumber, stage) item — never merged, never omitted.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					controlNumber: { type: Type.STRING, description: 'Copied exactly from the request.' },
+					stage: { type: Type.STRING, enum: ['stage1', 'stage2'] },
+					conclusionText: { type: Type.STRING, description: 'The full conclusion block for this control/stage, following the writing rules exactly. Built only from the evidence facts given for THIS control — never a fact mapped to a different control, even in the same batch.' },
+					rating: { type: Type.STRING, enum: ['C', 'C*', 'NC'] },
+					assumptions: { type: Type.ARRAY, items: { type: Type.STRING } },
+					unresolvedIssues: { type: Type.ARRAY, items: { type: Type.STRING } },
+				},
+				required: ['controlNumber', 'stage', 'conclusionText', 'rating', 'assumptions', 'unresolvedIssues'],
+			},
+		},
+	},
+	required: ['results'],
+};
+
 export interface ControlGroupAssignment {
 	controlNumber: string;
 	/** Exact title of a group in `groups` below (either an existing one reused, or one newly proposed). */
@@ -523,13 +733,18 @@ export class GeminiGenerate {
 		return text.trim();
 	}
 
-	/** Runs a structured-output call, returning the parsed JSON plus the thought summary (empty when `includeThinking` is false). */
+	/**
+	 * Runs a structured-output call, returning the parsed JSON plus the thought summary (empty when
+	 * `includeThinking` is false) and the raw token-usage metadata Gemini reports for this call —
+	 * callers that want it tracked (e.g. a tool calling `ctx.recordUsage`) read it off `usage`;
+	 * callers that don't just destructure `{ thinking, parsed }` as before, unaffected by this field.
+	 */
 	private async generateStructured<T>(
 		prompt: string,
 		schema: Schema,
 		model: string = this.model,
 		includeThinking = true,
-	): Promise<{ thinking: string; parsed: T }> {
+	): Promise<{ thinking: string; parsed: T; usage: GenerateContentResponse['usageMetadata'] }> {
 		const response = await this.ai.models.generateContent({
 			model,
 			contents: prompt,
@@ -549,7 +764,7 @@ export class GeminiGenerate {
 
 		const text = response.text;
 		if (!text) throw new Error('Gemini returned no structured output.');
-		return { thinking, parsed: JSON.parse(text) as T };
+		return { thinking, parsed: JSON.parse(text) as T, usage: response.usageMetadata };
 	}
 
 	/** Turns a free-text prompt into a keyword-dense description suited for vector-store retrieval. */
@@ -893,6 +1108,247 @@ export class GeminiGenerate {
 			Omit<DraftedStage2, 'thinking'>
 		>(prompt, DRAFT_STAGE2_SCHEMA);
 		return { thinking, ...parsed };
+	}
+
+	/** One stage's drafted conclusion, as produced by `prepareControlConclusion` — see `prepare_control_conclusion` (src/agent/tools/conclusion.ts), the chat agent's dedicated drafting tool. */
+	async prepareControlConclusion(
+		controlText: string,
+		stages: DraftStage[],
+		cachedEvidenceContext: string,
+		priorConclusion: string,
+		requestedChanges: string[],
+		writingRules: string,
+		guidance: string,
+		model?: string,
+	): Promise<{ thinking: string; stages: PreparedConclusionStage[]; usage: GenerateContentResponse['usageMetadata'] }> {
+		const stageInstructions: Record<DraftStage, string> = {
+			stage1: 'Stage 1 (Test of Design) verifies the control is correctly DESIGNED — that policy/configuration establishes it, from general audit evidence.',
+			stage2: 'Stage 2 (Test of Effectiveness) verifies the control actually OPERATES as designed in practice, from interview evidence/walkthroughs.',
+		};
+		const prompt = [
+			'You are an auditor drafting one or more conclusions for a single control, via a dedicated',
+			'conclusion-generation tool rather than free-form prompting. Produce exactly one entry in',
+			'"stages" for each stage requested below — independent of each other, each with its own',
+			'conclusionText and rating.',
+			'',
+			...stages.map((s) => stageInstructions[s]),
+			'',
+			'You MUST follow the writing rules below exactly for phrasing and structure. Each',
+			'conclusionText is the ENTIRE conclusion block as one piece of text — it must contain all of',
+			'the sub-parts the writing rules define (e.g. Findings, then Observations/Recommendations,',
+			'then Evidence), each properly labeled within that single block exactly as the rules specify.',
+			'',
+			'Decide each rating: "C" if fully conform with no issues, "C*" if conform but with a minor',
+			'observation, "NC" if a non-conformity requiring a recommendation was found.',
+			'',
+			'CRITICAL: never treat missing or absent evidence as satisfactory. If the evidence below does',
+			'not actually cover something the control requires, that is a gap — list it in',
+			'unresolvedIssues for that stage, and let it inform (do not silently ignore it for) the',
+			'rating. List in assumptions anything you had to take as given because it was not explicit in',
+			'what was provided (e.g. "assumed the named policy document is still current"). Both arrays',
+			'must be empty only when genuinely nothing applies — never omit a known gap to look complete.',
+			'',
+			'Writing rules:',
+			writingRules,
+			'',
+			...(guidance ? ['Additional guidance for this control:', guidance, ''] : []),
+			'Control:',
+			controlText,
+			'',
+			...(priorConclusion ? ['Prior conclusion (for context, e.g. when revising):', priorConclusion, ''] : []),
+			...(requestedChanges.length > 0
+				? ['Specific changes requested for this revision — address every one of these:', requestedChanges.map((c) => `- ${c}`).join('\n'), '']
+				: []),
+			'Evidence gathered for this control (already retrieved — do not invent anything beyond this):',
+			cachedEvidenceContext || '(none provided)',
+			'',
+			'Draft the requested stage(s) now, following the writing rules exactly.',
+		].join('\n');
+
+		const { thinking, parsed, usage } = await this.generateStructured<{ stages: PreparedConclusionStage[] }>(prompt, PREPARED_CONCLUSION_SCHEMA, model ?? this.model);
+		return { thinking, stages: parsed.stages, usage };
+	}
+
+	/**
+	 * One control+stage's batched QA result, as produced by `qaReviewConclusionsBatch` — see
+	 * `qa_review_conclusions_batch` (src/agent/tools/qaBatch.ts). `writingRules` is the SAME
+	 * `defaultWritingRules`/`defaultStage2WritingRules` settings the drafting pipeline and
+	 * `prepareControlConclusion` already use — QA never gets its own separate copy of the rules, so
+	 * there is exactly one place they're maintained.
+	 */
+	async qaReviewConclusionsBatch(
+		items: QaBatchItemInput[],
+		writingRules: { stage1: string; stage2: string },
+		profile: WritingStyleProfile,
+		model?: string,
+	): Promise<{ thinking: string; results: QaBatchItemResult[]; usage: GenerateContentResponse['usageMetadata'] }> {
+		const stagesPresent = new Set(items.map((it) => it.stage));
+		const rulesBlock = [
+			stagesPresent.has('stage1') ? `Stage 1 (Test of Design) writing rules:\n${writingRules.stage1}` : '',
+			stagesPresent.has('stage2') ? `Stage 2 (Test of Effectiveness) writing rules:\n${writingRules.stage2}` : '',
+		].filter(Boolean).join('\n\n') || '(no rules configured)';
+		const prohibitedBlock = profile.prohibitedWording.length > 0
+			? profile.prohibitedWording.join(', ')
+			: '(none configured)';
+		const itemsBlock = items
+			.map((it, i) => [
+				`[${i}] Control ${it.controlId} — ${it.stage}`,
+				`Rating: ${it.rating}`,
+				`Evidence references: ${it.evidenceReferences.join(', ') || '(none listed)'}`,
+				'Conclusion text:',
+				it.conclusionText,
+			].join('\n'))
+			.join('\n\n');
+
+		const prompt = [
+			`You are independently QA-reviewing a batch of ${items.length} drafted audit conclusion(s)`,
+			`against the configured writing-style profile "${profile.name}" (version ${profile.version}).`,
+			'This is a genuine, separate check — not a restatement of the draft. For EACH item, by its',
+			'[index], verify:',
+			'- Evidence alignment: every claim is actually supported by the listed evidence references.',
+			'- No unsupported claims: nothing stated as fact beyond what the evidence references show.',
+			'- Internal consistency: the rating matches what the conclusion text itself describes.',
+			'- Required structure: the conclusion follows the writing rules\' required structure exactly.',
+			'- Style: tone/phrasing matches the configured rules below.',
+			'- Prohibited wording: flag (and remove/rephrase in the corrected text) any use of the',
+			'  prohibited words/phrases below, case-insensitive.',
+			'- Control/evidence-reference correctness: the control id is right and every evidence',
+			'  reference cited in the text is one of the ones listed for that item (never invented).',
+			'',
+			'Do not do new research — only use what is given per item. If evidence is genuinely',
+			'insufficient to judge an item, say so in its findings and fail it; do not guess.',
+			'',
+			'For each item, return pass/fail, a corrected version of the conclusion text and rating (the',
+			'SAME text/rating as the input when nothing needed to change — never leave these blank), and',
+			'the specific findings that justify the verdict (empty array only if genuinely none).',
+			'',
+			'Writing-style rules:',
+			rulesBlock,
+			'',
+			'Prohibited wording:',
+			prohibitedBlock,
+			'',
+			'Items to review:',
+			itemsBlock,
+		].join('\n');
+
+		const { thinking, parsed, usage } = await this.generateStructured<{ results: QaBatchItemResult[] }>(prompt, QA_BATCH_SCHEMA, model ?? this.model);
+		return { thinking, results: parsed.results, usage };
+	}
+
+	/**
+	 * Rapid Fire Phase 1 (FR-8.3): groups a potentially large set of controls into bounded topic
+	 * batches using semantic + deterministic signal (framework section, family, technology, process,
+	 * evidence type, requested stage) — guarded against grouping purely on generic words like
+	 * "documented"/"reviewed"/"approved". Token-budget splitting (FR-8.3's "split a batch when its
+	 * combined context exceeds the available token budget") is done by the caller from
+	 * `estimatedContextTokens`, not here — the model only proposes topic coherence.
+	 */
+	async buildSimilarityBatches(
+		controls: { number: string; standard: string; topic: string; control: string; stages: DraftStage[] }[],
+		model?: string,
+	): Promise<{ thinking: string; plan: SimilarityBatchPlan; usage: GenerateContentResponse['usageMetadata'] }> {
+		const controlsBlock = controls
+			.map((c) => `[${c.number}] ${c.standard}${c.topic ? ` — ${c.topic}` : ''} (${c.stages.join('+')})\n${c.control}`)
+			.join('\n\n');
+		const prompt = [
+			'You are building bounded topic batches of audit controls so they can later share research',
+			'and QA context efficiently. Group controls that genuinely share a framework section, control',
+			'family, technology, process, or evidence type — NOT merely because their text contains the',
+			'same generic words (e.g. "documented", "reviewed", "approved" prove nothing on their own).',
+			'',
+			'Every assignment needs its own one-sentence reason naming the SPECIFIC shared signal (e.g.',
+			'"both require evidence of quarterly access reviews"), not a vague "similar topic".',
+			'',
+			'Controls to batch (number, standard/topic, requested stage(s), text):',
+			controlsBlock,
+		].join('\n');
+
+		const { thinking, parsed, usage } = await this.generateStructured<Omit<SimilarityBatchPlan, 'thinking' | 'sharedTermsByBatch'> & { sharedTermsByBatch: { batchLabel: string; terms: string[] }[] }>(prompt, SIMILARITY_BATCH_SCHEMA, model ?? this.model);
+		const sharedTermsByBatch: Record<string, string[]> = {};
+		for (const entry of parsed.sharedTermsByBatch) sharedTermsByBatch[entry.batchLabel] = entry.terms;
+		return { thinking, plan: { thinking, batchLabels: parsed.batchLabels, sharedTermsByBatch, assignments: parsed.assignments }, usage };
+	}
+
+	/**
+	 * Rapid Fire Phase 2 (FR-8.4): extracts discrete, control-mapped evidence facts from the
+	 * snippets retrieved for one topic batch. The "critical rule" (shared evidence usable only when
+	 * EXPLICITLY mapped to a control) is enforced by the schema requiring `controlNumbers` per fact,
+	 * not inferred from the batch as a whole — a fact the model can't attribute to a specific control
+	 * simply doesn't get one in its `controlNumbers` array, and drafting (Phase 3) only ever sees
+	 * facts actually mapped to the control it's drafting.
+	 */
+	async extractThematicEvidence(
+		topicLabel: string,
+		controlNumbers: string[],
+		snippets: { sourcePath: string; location: string; text: string }[],
+		model?: string,
+	): Promise<{ thinking: string; extraction: ThemeEvidenceExtraction; usage: GenerateContentResponse['usageMetadata'] }> {
+		const snippetsBlock = snippets.map((s) => `Source: ${s.sourcePath} (${s.location})\n${s.text}`).join('\n\n');
+		const prompt = [
+			`You are extracting evidence facts for the "${topicLabel}" topic batch, covering controls:`,
+			controlNumbers.join(', '),
+			'',
+			'From the retrieved snippets below, extract discrete facts. For EACH fact, map it ONLY to the',
+			'specific control(s) it actually supports — never every control in the batch just because they',
+			'share a topic. A fact relevant to none of these controls should simply be omitted.',
+			'',
+			'Also list, per control, anything these controls need that the snippets do NOT cover — be',
+			'specific (cite the control number). This is carried forward as an honest gap, never silently',
+			'dropped.',
+			'',
+			'Retrieved snippets:',
+			snippetsBlock || '(none retrieved)',
+		].join('\n');
+
+		const { thinking, parsed, usage } = await this.generateStructured<Omit<ThemeEvidenceExtraction, 'thinking'>>(prompt, THEME_EVIDENCE_SCHEMA, model ?? this.model);
+		return { thinking, extraction: { thinking, ...parsed }, usage };
+	}
+
+	/**
+	 * Rapid Fire Phase 3 (FR-8.5): drafts several (control, stage) conclusions in one call, each
+	 * built only from the evidence facts mapped to that specific item — never another item's facts,
+	 * even within the same batch, even though they're in the same prompt. The caller (the Rapid Fire
+	 * engine) validates the result has exactly one entry per requested item and retries only
+	 * missing/malformed ones, per FR-8.5's process.
+	 */
+	async draftConclusionsBatch(
+		items: BatchDraftItemInput[],
+		evidenceContextByItem: Record<string, string>,
+		writingRules: string,
+		model?: string,
+	): Promise<{ thinking: string; results: BatchDraftItemResult[]; usage: GenerateContentResponse['usageMetadata'] }> {
+		const itemsBlock = items
+			.map((it, i) => {
+				const key = `${it.controlNumber}:${it.stage}`;
+				return [
+					`[${i}] Control ${it.controlNumber} — ${it.stage}`,
+					it.controlText,
+					...(it.priorConclusion ? ['Prior conclusion (context, e.g. revising):', it.priorConclusion] : []),
+					'Evidence facts mapped to THIS item only:',
+					evidenceContextByItem[key] || '(none mapped — treat as an evidence gap, do not borrow another item\'s facts)',
+				].join('\n');
+			})
+			.join('\n\n');
+
+		const prompt = [
+			`Draft ${items.length} control/stage conclusion(s) in one pass. Each entry below is INDEPENDENT:`,
+			'build its conclusion only from the evidence facts listed under that same entry — never from',
+			'another entry\'s facts, even though they appear in the same batch below. If an item\'s facts',
+			'are thin or absent, its rating and unresolvedIssues must reflect that honestly rather than',
+			'borrowing confidence from a different item.',
+			'',
+			'You MUST follow the writing rules below exactly for phrasing and structure.',
+			'',
+			'Writing rules:',
+			writingRules,
+			'',
+			'Items:',
+			itemsBlock,
+		].join('\n');
+
+		const { thinking, parsed, usage } = await this.generateStructured<{ results: BatchDraftItemResult[] }>(prompt, BATCH_DRAFT_SCHEMA, model ?? this.model);
+		return { thinking, results: parsed.results, usage };
 	}
 
 	/**

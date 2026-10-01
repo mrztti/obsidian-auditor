@@ -3,6 +3,7 @@ import type { TFile } from 'obsidian';
 import type AuditorPlugin from '../../main';
 import type { StoreKind } from '../../main';
 import type { SearchResult } from '../../vectorStore';
+import { ResearchCache } from '../researchCache';
 import { clampInt, str, truncate, type AgentTool } from './types';
 
 // referenceReports is deliberately not a general search/list source: it must only be reached through
@@ -59,10 +60,19 @@ export const searchDocumentsTool: AgentTool = {
 		if (!query) return { ok: false, output: { error: 'query is required.' }, summary: 'Empty search query' };
 		const limit = clampInt(args.limit, 8, 1, 20);
 		const kinds = parseSources(args.sources);
-		const perStore = await Promise.all(kinds.map((k) => ctx.plugin.storeFor(k).search(query, limit).catch(() => [] as SearchResult[])));
-		const results = perStore
-			.flatMap((rs, i) => rs.map((r) => ({ source: kinds[i]!, r })))
-			.sort((a, b) => b.r.score - a.r.score);
+
+		// Research cache (FR-5.2): an equivalent search (same query/sources/limit) made earlier in this
+		// or an earlier chat is reused instead of re-querying the vector store, invalidated automatically
+		// if any matched file has since changed.
+		const cacheKey = ResearchCache.key('search_documents', { query, kinds: [...kinds].sort(), limit });
+		const { value: results, hit } = await ctx.plugin.researchCache.getOrFetch(cacheKey, async () => {
+			const perStore = await Promise.all(kinds.map((k) => ctx.plugin.storeFor(k).search(query, limit).catch(() => [] as SearchResult[])));
+			const value = perStore
+				.flatMap((rs, i) => rs.map((r) => ({ source: kinds[i]!, r })))
+				.sort((a, b) => b.r.score - a.r.score);
+			return { value, sourceFiles: [...new Set(value.map(({ r }) => r.sourcePath))] };
+		});
+
 		if (kinds.some((k) => CURRENT_EVIDENCE_SOURCES.includes(k))) ctx.markCurrentEvidence();
 		return {
 			output: {
@@ -70,7 +80,7 @@ export const searchDocumentsTool: AgentTool = {
 				results: results.map(({ source, r }) => ({ source, location: label(r), path: r.sourcePath, score: Number(r.score.toFixed(3)), text: truncate(r.text, 1500) })),
 				...(results.length === 0 ? { hint: 'Nothing found. The index may be empty or not built yet, or try different terms.' } : {}),
 			},
-			summary: `${results.length} results across ${kinds.join(', ')}`,
+			summary: `${results.length} results across ${kinds.join(', ')}${hit ? ' (cached)' : ''}`,
 		};
 	},
 };
@@ -142,16 +152,22 @@ export const readDocumentTool: AgentTool = {
 		if (!allowed) return { ok: false, output: { error: 'That file is outside the configured audit folders.' }, summary: 'File outside audit folders' };
 		if (SOURCES.some((k) => CURRENT_EVIDENCE_SOURCES.includes(k) && inFolder(file, folderFor(ctx.plugin, k)))) ctx.markCurrentEvidence();
 
-		let pages: string[] | null;
+		// Research cache (FR-5.2): the parsed text of this file is cached once per path and reused for
+		// every offset paged through, across runs — invalidated automatically the moment the file changes.
+		const cacheKey = ResearchCache.key('read_document', { path });
+		let text: string;
+		let hit: boolean;
 		try {
-			pages = await ctx.plugin.storeFor('evidence').readPages(vault, file);
+			({ value: text, hit } = await ctx.plugin.researchCache.getOrFetch(cacheKey, async () => {
+				const pages = await ctx.plugin.storeFor('evidence').readPages(vault, file);
+				if (!pages) throw new Error(`Unsupported file type ".${file.extension}".`);
+				const joined = pages.length > 1 ? pages.map((p, i) => `--- page/sheet ${i + 1} ---\n${p}`).join('\n\n') : (pages[0] ?? '');
+				return { value: joined, sourceFiles: [path] };
+			}));
 		} catch (e) {
 			return { ok: false, output: { error: `Could not read the file: ${String(e)}` }, summary: `Could not read ${path}` };
 		}
-		if (!pages) return { ok: false, output: { error: `Unsupported file type ".${file.extension}".` }, summary: `Unsupported type: ${file.extension}` };
 
-		const paged = pages.length > 1;
-		const text = paged ? pages.map((p, i) => `--- page/sheet ${i + 1} ---\n${p}`).join('\n\n') : (pages[0] ?? '');
 		const offset = clampInt(args.offset, 0, 0, Math.max(text.length - 1, 0));
 		const slice = text.slice(offset, offset + READ_CHUNK_CHARS);
 		const end = offset + slice.length;
@@ -164,7 +180,7 @@ export const readDocumentTool: AgentTool = {
 				text: slice,
 				...(end < text.length ? { nextOffset: end, note: 'Document continues — call read_document again with nextOffset if you need the rest.' } : {}),
 			},
-			summary: `Read ${path}${isReference ? ' (style reference only)' : ''} (${offset}–${end} of ${text.length} chars)`,
+			summary: `Read ${path}${isReference ? ' (style reference only)' : ''} (${offset}–${end} of ${text.length} chars)${hit ? ' (cached)' : ''}`,
 		};
 	},
 };

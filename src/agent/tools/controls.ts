@@ -2,7 +2,7 @@ import { Type } from '@google/genai';
 import type AuditorPlugin from '../../main';
 import { CONTROL_RATINGS, CONTROL_STATUSES, todayIsoDate } from '../../controlNote';
 import { summarizeControl } from '../controlStore';
-import { EDITABLE_CONTROL_FIELDS, FIELD_LABELS, STAGE_FOR_FIELD, type DiffEntry, type DraftStage, type EditableControlField, type ResolvedChange, type ReviewItem } from '../types';
+import { EDITABLE_CONTROL_FIELDS, FIELD_LABELS, STAGE_FOR_FIELD, type ApplyOutcome, type DiffEntry, type DraftStage, type EditableControlField, type ResolvedChange, type ReviewItem } from '../types';
 import { clampInt, str, type AgentTool } from './types';
 
 export const findControlsTool: AgentTool = {
@@ -131,14 +131,71 @@ function commentsEntry(change: ResolvedChange): DiffEntry {
 	};
 }
 
-function toReviewItem(change: ResolvedChange, plugin: AuditorPlugin): ReviewItem {
-	return {
-		key: change.number,
-		title: change.number,
-		subtitle: change.after.topic || change.after.control.slice(0, 60),
-		open: { label: 'Open note', run: () => { void plugin.app.workspace.getLeaf('tab').openFile(change.file); } },
-		entries: change.changedFields.map((field) => (field === 'comments' ? commentsEntry(change) : fieldEntry(change, field))),
-	};
+/** Which `DraftStage` (if any) a changed field belongs to — fields outside `STAGE_FOR_FIELD` (and `comments`) are "general". */
+const stageOf = (field: EditableControlField | 'comments'): DraftStage | 'general' => (field === 'comments' ? 'general' : STAGE_FOR_FIELD[field] ?? 'general');
+
+/** One independently reviewable slice of a `ResolvedChange` — either its general (non-stage) fields, or one stage's fields — so Stage 1 and Stage 2 (and any plain field edits) can be accepted or rejected separately per FR-2.1/FR-3.4, even when they were drafted and proposed together. */
+export interface ControlSubItem {
+	key: string;
+	controlNumber: string;
+	stage: DraftStage | 'general';
+	fields: (EditableControlField | 'comments')[];
+	reviewItem: ReviewItem;
+}
+
+/**
+ * Splits one control's resolved change into up to three sub-items (general / Stage 1 / Stage 2),
+ * each its own reviewable card. A control touched on only one "lane" (the common case — e.g. a
+ * single-field edit) gets exactly one sub-item, keyed by the plain control number so its behavior
+ * and the diff/outcome keying are unchanged from before this split existed.
+ */
+function splitIntoSubItems(change: ResolvedChange, plugin: AuditorPlugin): ControlSubItem[] {
+	const lanes: (DraftStage | 'general')[] = ['general', 'stage1', 'stage2'];
+	const groups = lanes
+		.map((lane) => ({ lane, fields: change.changedFields.filter((f) => stageOf(f) === lane) }))
+		.filter((g) => g.fields.length > 0);
+	const multi = groups.length > 1;
+
+	return groups.map(({ lane, fields }) => {
+		const key = multi ? `${change.number}::${lane}` : change.number;
+		const title = lane === 'general' ? change.number : `${change.number} · ${STAGE_LABEL[lane]}`;
+		return {
+			key,
+			controlNumber: change.number,
+			stage: lane,
+			fields,
+			reviewItem: {
+				key,
+				title,
+				subtitle: change.after.topic || change.after.control.slice(0, 60),
+				open: { label: 'Open note', run: () => { void plugin.app.workspace.getLeaf('tab').openFile(change.file); } },
+				entries: fields.map((field) => (field === 'comments' ? commentsEntry(change) : fieldEntry(change, field))),
+			},
+		};
+	});
+}
+
+/**
+ * Rebuilds one `ResolvedChange` per control number from only the sub-items that were actually
+ * accepted — so a control where Stage 1 was accepted and Stage 2 rejected gets exactly its Stage 1
+ * fields written, never a wholesale overwrite with the rejected Stage 2 draft along for the ride.
+ */
+function buildAcceptedChanges(resolved: ResolvedChange[], subItems: ControlSubItem[], approvedKeys: string[]): ResolvedChange[] {
+	const approved = new Set(approvedKeys);
+	const out: ResolvedChange[] = [];
+	for (const change of resolved) {
+		const acceptedFields = new Set(
+			subItems.filter((s) => s.controlNumber === change.number && approved.has(s.key)).flatMap((s) => s.fields),
+		);
+		if (acceptedFields.size === 0) continue;
+		const after = { ...change.before, comments: [...change.before.comments] };
+		for (const field of acceptedFields) {
+			if (field === 'comments') after.comments = [...change.after.comments];
+			else (after as unknown as Record<string, unknown>)[field] = (change.after as unknown as Record<string, unknown>)[field];
+		}
+		out.push({ ...change, after, changedFields: [...acceptedFields] });
+	}
+	return out;
 }
 
 export const proposeChangesTool: AgentTool = {
@@ -219,24 +276,90 @@ export const proposeChangesTool: AgentTool = {
 			};
 		}
 
-		const decision = await ctx.host.requestApproval({ heading: `Review proposed changes (${resolved.length} control${resolved.length === 1 ? '' : 's'})`, summary: str(args.summary), items: resolved.map((c) => toReviewItem(c, ctx.plugin)), burn: ctx.isBurnActive() });
-		const toApply = resolved.filter((c) => decision.approved.includes(c.number));
+		const subItems = resolved.flatMap((c) => splitIntoSubItems(c, ctx.plugin));
+		const decision = await ctx.host.requestApproval({
+			heading: `Review proposed changes (${subItems.length} item${subItems.length === 1 ? '' : 's'} across ${resolved.length} control${resolved.length === 1 ? '' : 's'})`,
+			summary: str(args.summary),
+			items: subItems.map((s) => s.reviewItem),
+			burn: ctx.isBurnActive(),
+		});
+
+		const toApply = buildAcceptedChanges(resolved, subItems, decision.approved);
 		const outcomes = toApply.length > 0 ? await ctx.controls.apply(toApply) : [];
-		ctx.host.reportApplied(outcomes);
+		ctx.host.reportApplied(reKeyOutcomesBySubItem(outcomes, subItems, decision.approved));
 
 		const saved = outcomes.filter((o) => o.ok).map((o) => o.key);
 		const failed = outcomes.filter((o) => !o.ok);
+		const rejectedItems = subItems.filter((s) => decision.rejected.includes(s.key));
+		await recordDecisionMemory(ctx, subItems, resolved, decision, new Set(saved));
 		return {
 			output: {
 				saved,
-				rejectedByUser: decision.rejected,
+				rejectedByUser: rejectedItems.map((s) => ({ controlNumber: s.controlNumber, stage: s.stage, comment: decision.comments[s.key] ?? '' })),
 				...(failed.length > 0 ? { failedToSave: failed } : {}),
-				...(decision.feedback ? { userFeedback: decision.feedback } : {}),
-				nextStep: decision.rejected.length > 0 || failed.length > 0
-					? 'Some changes were not saved. Address the user feedback or the errors (re-read controls if needed) and propose again, or explain to the user if you should stop.'
+				nextStep: saved.length === 0 || rejectedItems.length > 0 || failed.length > 0
+					? 'Some items were not saved. For each entry in rejectedByUser, use its "comment" as the requestedChanges when re-drafting ONLY that control/stage with prepare_control_conclusion — do not touch or re-propose anything that already saved. Re-run QA only for what changed, then propose again. If nothing is listed in rejectedByUser either, the run was stopped before a decision — stop as well.'
 					: 'All changes saved. Write a short final summary for the user.',
 			},
-			summary: `Saved ${saved.length}${decision.rejected.length > 0 ? `, rejected ${decision.rejected.length}` : ''}${failed.length > 0 ? `, failed ${failed.length}` : ''}`,
+			summary: `Saved ${saved.length}${rejectedItems.length > 0 ? `, rejected ${rejectedItems.length}` : ''}${failed.length > 0 ? `, failed ${failed.length}` : ''}`,
 		};
 	},
 };
+
+/**
+ * Records each genuinely-decided sub-item into persistent memory (FR-6.3's "accepted user
+ * decisions"/"accepted conclusions") — never the draft text itself, only the outcome: which
+ * control/stage, what was decided, and (for a saved stage conclusion) the rating, so a future chat
+ * session can see at a glance what was already settled without re-reading the full note. Items that
+ * were approved but failed to actually save are skipped — nothing was accepted in the vault yet.
+ */
+async function recordDecisionMemory(
+	ctx: Parameters<AgentTool['run']>[1],
+	subItems: ControlSubItem[],
+	resolved: ResolvedChange[],
+	decision: { approved: string[]; rejected: string[]; comments: Record<string, string> },
+	savedKeys: Set<string>,
+): Promise<void> {
+	const byNumber = new Map(resolved.map((c) => [c.number, c]));
+	for (const s of subItems) {
+		const wasApproved = decision.approved.includes(s.key);
+		const wasRejected = decision.rejected.includes(s.key);
+		if (!wasApproved && !wasRejected) continue;
+		if (wasApproved && !savedKeys.has(s.key)) continue; // approved but failed to write — nothing was actually accepted
+
+		const stageLabel = s.stage === 'general' ? 'general fields' : STAGE_LABEL[s.stage];
+		const comment = decision.comments[s.key];
+		await ctx.plugin.agentMemory.remember(
+			'acceptedDecision',
+			wasApproved
+				? `${s.controlNumber} (${stageLabel}): user accepted.${comment ? ` Note: ${comment}` : ''}`
+				: `${s.controlNumber} (${stageLabel}): user rejected. Reason: ${comment ?? '(no comment)'}`,
+			s.controlNumber,
+		);
+
+		if (wasApproved && (s.stage === 'stage1' || s.stage === 'stage2')) {
+			const ratingField = s.stage === 'stage1' ? 'todRating' : 'toeRating';
+			const rating = byNumber.get(s.controlNumber)?.after[ratingField];
+			if (typeof rating === 'string' && rating) {
+				await ctx.plugin.agentMemory.remember(
+					'acceptedConclusion',
+					`${s.controlNumber} ${STAGE_LABEL[s.stage]}: rated ${rating} (user-approved conclusion saved to the control note).`,
+					s.controlNumber,
+				);
+			}
+		}
+	}
+}
+
+/** Outcomes come back keyed by control number (one write per control); the UI needs them keyed by sub-item so each independently-reviewed card (general/Stage 1/Stage 2) shows its own Saved/Failed/Not applied status. A sub-item that was never approved simply gets no entry, same as before this split existed. */
+function reKeyOutcomesBySubItem(outcomes: ApplyOutcome[], subItems: ControlSubItem[], approvedKeys: string[]): ApplyOutcome[] {
+	const byNumber = new Map(outcomes.map((o) => [o.key, o]));
+	const approved = new Set(approvedKeys);
+	return subItems
+		.filter((s) => approved.has(s.key))
+		.map((s): ApplyOutcome | null => {
+			const outcome = byNumber.get(s.controlNumber);
+			return outcome ? { ...outcome, key: s.key } : null;
+		})
+		.filter((o): o is ApplyOutcome => o !== null);
+}

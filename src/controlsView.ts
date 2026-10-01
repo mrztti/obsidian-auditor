@@ -11,6 +11,7 @@ import {
 import { ImportControlsModal } from './importControlsModal';
 import { EvidenceGoalsModal } from './evidenceGoalsModal';
 import { ExportControlsModal } from './exportControlsModal';
+import { RapidFireExportModal } from './rapidFire/exportModal';
 import type { DraftStage } from './agent/draftQueue';
 
 export const CONTROLS_VIEW_TYPE = 'auditor-controls-view';
@@ -62,9 +63,10 @@ function maxSeverity(record: ControlRecord): number {
 }
 
 interface ControlFilters {
-	/** Empty set = no restriction (matches everything) — for session/standard/status, multiple values may be selected at once (e.g. sessions 1, 2, 3). */
+	/** Empty set = no restriction (matches everything) — for session/standard/topic/status, multiple values may be selected at once (e.g. sessions 1, 2, 3). */
 	sessions: Set<string>;
 	standards: Set<string>;
+	topics: Set<string>;
 	statuses: Set<string>;
 	minRating: '' | 'C' | 'C*' | 'NC';
 	commentsOnly: boolean;
@@ -73,21 +75,57 @@ interface ControlFilters {
 }
 
 function emptyFilters(): ControlFilters {
-	return { sessions: new Set(), standards: new Set(), statuses: new Set(), minRating: '', commentsOnly: false, searchQuery: '' };
+	return { sessions: new Set(), standards: new Set(), topics: new Set(), statuses: new Set(), minRating: '', commentsOnly: false, searchQuery: '' };
+}
+
+/** Human-readable summary of the active filters — shown in the Rapid Fire export confirmation (FR-8.1) and stored on the resulting batch as a frozen label, never re-evaluated against live filter state. */
+function describeFilters(filters: ControlFilters): string {
+	const parts: string[] = [];
+	if (filters.sessions.size > 0) parts.push(`session: ${[...filters.sessions].join(', ')}`);
+	if (filters.standards.size > 0) parts.push(`standard: ${[...filters.standards].join(', ')}`);
+	if (filters.topics.size > 0) parts.push(`topic: ${[...filters.topics].join(', ')}`);
+	if (filters.statuses.size > 0) parts.push(`status: ${[...filters.statuses].join(', ')}`);
+	if (filters.minRating) parts.push(`rating ≥ ${filters.minRating}`);
+	if (filters.commentsOnly) parts.push('has comments');
+	if (filters.searchQuery.trim()) parts.push(`search: "${filters.searchQuery.trim()}"`);
+	return parts.join('; ');
 }
 
 function matchesFilters(record: ControlRecord, filters: ControlFilters): boolean {
 	if (filters.sessions.size > 0 && !filters.sessions.has(record.session)) return false;
 	if (filters.standards.size > 0 && !filters.standards.has(record.standard)) return false;
+	if (filters.topics.size > 0 && !filters.topics.has(record.topic)) return false;
 	if (filters.statuses.size > 0 && !filters.statuses.has(record.status)) return false;
 	if (filters.minRating && maxSeverity(record) < (RATING_SEVERITY[filters.minRating] ?? 0)) return false;
 	if (filters.commentsOnly && record.comments.length === 0) return false;
 	return true;
 }
 
-/** Distinct, sorted non-empty values of `key` across all entries — used to populate the session/standard/status filter dropdowns from whatever's actually in the vault. */
-function distinctValues(entries: { record: ControlRecord }[], key: 'session' | 'standard' | 'status'): string[] {
+/** Distinct, sorted non-empty values of `key` across all entries — used to populate the session/standard/topic/status filter dropdowns from whatever's actually in the vault. */
+function distinctValues(entries: { record: ControlRecord }[], key: 'session' | 'standard' | 'topic' | 'status'): string[] {
 	return [...new Set(entries.map((e) => e.record[key]).filter((v) => v.trim()))].sort((a, b) => a.localeCompare(b));
+}
+
+type SetFilterKey = 'sessions' | 'standards' | 'topics' | 'statuses';
+const RECORD_KEY_FOR: Record<SetFilterKey, 'session' | 'standard' | 'topic' | 'status'> = {
+	sessions: 'session',
+	standards: 'standard',
+	topics: 'topic',
+	statuses: 'status',
+};
+
+/**
+ * Options for one multi-select filter, narrowed to whatever's actually reachable given every
+ * OTHER currently-active filter (sets, min rating, comments-only — not the free-text search,
+ * which stays a separate reordering step) — so picking a session, say, immediately shrinks the
+ * Standard/Topic/Status dropdowns to only the values that still occur within it, cascading as more
+ * filters are added. A value already selected in `except` itself is never excluded by this, since
+ * `except`'s own criterion is dropped before matching.
+ */
+function optionsExcluding(entries: { record: ControlRecord }[], filters: ControlFilters, except: SetFilterKey): string[] {
+	const partial: ControlFilters = { ...filters, [except]: new Set<string>() };
+	const matching = entries.filter((e) => matchesFilters(e.record, partial));
+	return distinctValues(matching, RECORD_KEY_FOR[except]);
 }
 
 /**
@@ -217,9 +255,21 @@ export class ControlsView extends ItemView {
 		let allEntries: { file: TFile; record: ControlRecord }[] = [];
 		const filters = emptyFilters();
 
-		const sessionFilter = this.createMultiSelectFilter(filtersRow, 'Session', filters.sessions, () => distinctValues(allEntries, 'session'), () => applyFilter());
-		const standardFilter = this.createMultiSelectFilter(filtersRow, 'Standard', filters.standards, () => distinctValues(allEntries, 'standard'), () => applyFilter());
-		const statusFilter = this.createMultiSelectFilter(filtersRow, 'Status', filters.statuses, () => distinctValues(allEntries, 'status'), () => applyFilter());
+		// Reassigned once all four filters exist (see below) — referenced here only by closure, so the
+		// temporary no-op is never actually called before the real one is in place.
+		let refreshAllFilterOptions = () => {};
+		const onFilterChange = () => { refreshAllFilterOptions(); applyFilter(); };
+
+		const sessionFilter = this.createMultiSelectFilter(filtersRow, 'Session', filters.sessions, () => optionsExcluding(allEntries, filters, 'sessions'), onFilterChange);
+		const standardFilter = this.createMultiSelectFilter(filtersRow, 'Standard', filters.standards, () => optionsExcluding(allEntries, filters, 'standards'), onFilterChange);
+		const topicFilter = this.createMultiSelectFilter(filtersRow, 'Topic', filters.topics, () => optionsExcluding(allEntries, filters, 'topics'), onFilterChange);
+		const statusFilter = this.createMultiSelectFilter(filtersRow, 'Status', filters.statuses, () => optionsExcluding(allEntries, filters, 'statuses'), onFilterChange);
+		refreshAllFilterOptions = () => {
+			sessionFilter.refreshOptions();
+			standardFilter.refreshOptions();
+			topicFilter.refreshOptions();
+			statusFilter.refreshOptions();
+		};
 
 		const minRatingSelect = filtersRow.createEl('select');
 		for (const [value, label] of [['', 'Any rating'], ['C', 'At least C'], ['C*', 'At least C*'], ['NC', 'At least NC']] as const) {
@@ -230,6 +280,8 @@ export class ControlsView extends ItemView {
 		commentsOnlyLabel.createSpan({ text: 'Has comments' });
 		const clearBtn = filtersRow.createEl('button', { text: 'Clear filters' });
 		const exportBtn = filtersRow.createEl('button', { text: 'Export…' });
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Rapid Fire" is the feature's own name
+		const rapidFireBtn = filtersRow.createEl('button', { text: 'Export to Rapid Fire…' });
 		const status = filtersRow.createDiv('auditor-controls-count');
 
 		const scrollArea = container.createDiv('auditor-controls-scroll-area');
@@ -301,28 +353,26 @@ export class ControlsView extends ItemView {
 			}
 			entries.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
 			allEntries = entries;
-			sessionFilter.refreshOptions();
-			standardFilter.refreshOptions();
-			statusFilter.refreshOptions();
+			refreshAllFilterOptions();
 			applyFilter();
 			scrollArea.scrollTop = savedScrollTop;
 		};
 		this.reload = load;
 
-		minRatingSelect.addEventListener('change', () => { filters.minRating = minRatingSelect.value as ControlFilters['minRating']; applyFilter(); });
-		commentsOnlyCheckbox.addEventListener('change', () => { filters.commentsOnly = commentsOnlyCheckbox.checked; applyFilter(); });
+		minRatingSelect.addEventListener('change', () => { filters.minRating = minRatingSelect.value as ControlFilters['minRating']; refreshAllFilterOptions(); applyFilter(); });
+		commentsOnlyCheckbox.addEventListener('change', () => { filters.commentsOnly = commentsOnlyCheckbox.checked; refreshAllFilterOptions(); applyFilter(); });
 		clearBtn.addEventListener('click', () => {
 			filters.sessions.clear();
 			filters.standards.clear();
+			filters.topics.clear();
 			filters.statuses.clear();
 			filters.minRating = '';
 			filters.commentsOnly = false;
 			sessionFilter.refreshLabel();
 			standardFilter.refreshLabel();
+			topicFilter.refreshLabel();
 			statusFilter.refreshLabel();
-			sessionFilter.refreshOptions();
-			standardFilter.refreshOptions();
-			statusFilter.refreshOptions();
+			refreshAllFilterOptions();
 			minRatingSelect.value = '';
 			commentsOnlyCheckbox.checked = false;
 			filters.searchQuery = '';
@@ -344,6 +394,9 @@ export class ControlsView extends ItemView {
 		});
 		exportBtn.addEventListener('click', () => {
 			new ExportControlsModal(this.app, this.plugin, currentlyFiltered()).open();
+		});
+		rapidFireBtn.addEventListener('click', () => {
+			new RapidFireExportModal(this.app, this.plugin, currentlyFiltered(), describeFilters(filters)).open();
 		});
 		void load();
 	}
