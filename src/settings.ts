@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import AuditorPlugin from './main';
-import { todayIsoDate } from './controlNote';
+import { todayIsoDate, type ControlFieldKey } from './controlNote';
 import { EXPORT_COLORS } from './exportColors';
 
 /**
@@ -28,6 +28,42 @@ export const EMPTY_WRITING_STYLE_PROFILE: WritingStyleProfile = {
 	version: 0,
 	prohibitedWording: [],
 	updatedAt: '',
+};
+
+/**
+ * Persisted bidirectional link between the vault's written controls and one sheet of one vault
+ * .xlsx file, keyed by header NAME rather than column number — so if the user reorders/inserts a
+ * column in Excel, the next sync still finds the right one by its header text instead of silently
+ * writing into the wrong column. `headerRowNumber` is the one positional fact worth freezing (where
+ * the header row itself sits), since re-sniffing it on every sync risks picking a different row if a
+ * banner/title row above it changes.
+ */
+export interface ExcelLinkConfig {
+	/** Vault path to the linked .xlsx/.xls file. Empty = link not configured. */
+	filePath: string;
+	sheetName: string;
+	/** 1-based row number the column headers live on. */
+	headerRowNumber: number;
+	/** Header text of the column used to match a sheet row to a control note, both directions. */
+	keyColumn: string;
+	/**
+	 * Optional header text of a column that gates sync-FROM-Excel: a sheet row is only synced
+	 * (updating or creating its control note) when this column is non-empty on that row. Empty =
+	 * every row with a key value is synced. Same idea as the one-shot import wizard's "Import gate
+	 * column", carried over here so the Excel link doesn't lose that control.
+	 */
+	gateColumn: string;
+	/** Field -> header text. A field absent here is never read from or written to the sheet. */
+	mapping: Partial<Record<ControlFieldKey, string>>;
+}
+
+export const EMPTY_EXCEL_LINK: ExcelLinkConfig = {
+	filePath: '',
+	sheetName: '',
+	headerRowNumber: 0,
+	keyColumn: '',
+	gateColumn: '',
+	mapping: {},
 };
 
 /**
@@ -159,6 +195,9 @@ export interface AuditorSettings {
 	rapidFireBoostedEscalationBudgetUsd: number;
 	/** Ceiling on Gemini GENERATION requests per second from the Rapid Fire engine — unlike the chat agent (naturally paced by the user reading/typing between turns), Rapid Fire can fire many drafting/QA calls back to back with nothing pacing them, so this exists specifically to avoid bursting past the provider's rate limit. */
 	rapidFireMaxRequestsPerSecond: number;
+
+	/** The single configured bidirectional Excel link — see `ExcelLinkConfig`. */
+	excelLink: ExcelLinkConfig;
 }
 
 const DEFAULT_WRITING_RULES = `RULE 1
@@ -285,6 +324,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	// Conservative default (1 generation call every 2s = 30/min) — comfortably under typical free-tier
 	// Gemini RPM limits; raise it in settings if your quota allows faster throughput.
 	rapidFireMaxRequestsPerSecond: 0.5,
+	excelLink: { ...EMPTY_EXCEL_LINK },
 };
 
 export class AuditorSettingTab extends PluginSettingTab {

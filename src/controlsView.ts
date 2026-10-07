@@ -8,7 +8,8 @@ import {
 	statusSlug,
 	type ControlRecord,
 } from './controlNote';
-import { ImportControlsModal } from './importControlsModal';
+import { ExcelLinkModal } from './excelLinkModal';
+import { isExcelLinkConfigured, syncFromExcel, syncToExcel } from './excelLink';
 import { EvidenceGoalsModal } from './evidenceGoalsModal';
 import { ExportControlsModal } from './exportControlsModal';
 import { RapidFireExportModal } from './rapidFire/exportModal';
@@ -247,8 +248,15 @@ export class ControlsView extends ItemView {
 		const searchInput = filtersRow.createEl('input', { type: 'text', cls: 'auditor-controls-search-input' });
 		searchInput.placeholder = 'Fuzzy search control text…';
 
-		const importBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Import controls' } });
-		setIcon(importBtn, 'file-up');
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Excel" is a literal product name
+		const excelLinkBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Configure Excel link' } });
+		setIcon(excelLinkBtn, 'link');
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Excel" is a literal product name
+		const syncFromExcelBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Sync from Excel' } });
+		setIcon(syncFromExcelBtn, 'arrow-down-to-line');
+		// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Excel" is a literal product name
+		const syncToExcelBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Sync to Excel' } });
+		setIcon(syncToExcelBtn, 'arrow-up-from-line');
 		const refreshBtn = filtersRow.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Refresh' } });
 		setIcon(refreshBtn, 'refresh-cw');
 
@@ -348,7 +356,11 @@ export class ControlsView extends ItemView {
 				);
 			const entries: { file: TFile; record: ControlRecord }[] = [];
 			for (const file of files) {
-				const content = await this.app.vault.cachedRead(file);
+				// `vault.read` (not `cachedRead`) deliberately: this view is reloaded right after
+				// programmatic writes (Excel sync, rapid fire, agent edits) that don't always go through
+				// an editor pane, and `cachedRead` can keep serving the pre-write cached content in that
+				// case — exactly the "control shows the old rating even though the file changed" bug.
+				const content = await this.app.vault.read(file);
 				entries.push({ file, record: parseControlNoteContent(content, file.basename) });
 			}
 			entries.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
@@ -387,10 +399,47 @@ export class ControlsView extends ItemView {
 		refreshBtn.addEventListener('click', () => {
 			void load();
 		});
-		importBtn.addEventListener('click', () => {
-			new ImportControlsModal(this.app, this.plugin, () => {
+		excelLinkBtn.addEventListener('click', () => {
+			new ExcelLinkModal(this.app, this.plugin, () => {
 				void load();
 			}).open();
+		});
+		syncFromExcelBtn.addEventListener('click', () => {
+			void (async () => {
+				if (!isExcelLinkConfigured(this.plugin.settings.excelLink)) {
+					// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Excel" is a literal product name
+					new Notice('Auditor: configure the Excel link first.');
+					return;
+				}
+				syncFromExcelBtn.disabled = true;
+				try {
+					const result = await syncFromExcel(this.plugin);
+					new Notice(`Auditor: synced from Excel — ${result.updated} updated, ${result.created} created${result.failed.length > 0 ? `, ${result.failed.length} failed` : ''}.`);
+					await load();
+				} catch (e) {
+					new Notice(`Auditor: sync from Excel failed — ${String(e)}`);
+				} finally {
+					syncFromExcelBtn.disabled = false;
+				}
+			})();
+		});
+		syncToExcelBtn.addEventListener('click', () => {
+			void (async () => {
+				if (!isExcelLinkConfigured(this.plugin.settings.excelLink)) {
+					// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Excel" is a literal product name
+					new Notice('Auditor: configure the Excel link first.');
+					return;
+				}
+				syncToExcelBtn.disabled = true;
+				try {
+					const result = await syncToExcel(this.plugin);
+					new Notice(`Auditor: synced to Excel — ${result.updated} row(s) updated${result.notInSheet > 0 ? `, ${result.notInSheet} control(s) not found in the sheet (skipped)` : ''}.`);
+				} catch (e) {
+					new Notice(`Auditor: sync to Excel failed — ${String(e)}`);
+				} finally {
+					syncToExcelBtn.disabled = false;
+				}
+			})();
 		});
 		exportBtn.addEventListener('click', () => {
 			new ExportControlsModal(this.app, this.plugin, currentlyFiltered()).open();

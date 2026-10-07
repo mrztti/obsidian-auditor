@@ -25,7 +25,7 @@ export const qaReviewBatchTool: AgentTool = {
 	declaration: {
 		name: 'qa_review_conclusions_batch',
 		description:
-			'Independently QA-reviews one or more drafted conclusions (from prepare_control_conclusion) in as few calls as practical. Validates evidence alignment, unsupported claims, internal consistency, required structure, the configured writing style, prohibited wording, and control/evidence-reference correctness — against the single writing-style profile configured in Auditor settings, never a profile you define yourself. Marks each passing (control, stage) as cleared for propose_control_changes, same as qa_review_conclusion. If no writing-style profile is configured in settings, this refuses outright — configure one (or tell the user to) rather than proceeding without one. Returns, per item, pass/fail, a corrected conclusion/rating (use these — they reflect the QA pass), and specific findings.',
+			'Independently QA-reviews one or more drafted conclusions (from prepare_control_conclusion) in as few calls as practical. Validates evidence alignment, unsupported claims, internal consistency, required structure, the configured writing style, prohibited wording, control/evidence-reference correctness, AND — critically — that the conclusion addresses ONLY what the control\'s own text actually specifies, never drifting onto related-but-unspecified topics just because evidence happens to touch on them. Checked against the single writing-style profile configured in Auditor settings, never a profile you define yourself. Marks each passing (control, stage) as cleared for propose_control_changes, same as qa_review_conclusion. If no writing-style profile is configured in settings, this refuses outright — configure one (or tell the user to) rather than proceeding without one. Returns, per item, pass/fail, a corrected conclusion/rating (use these — they reflect the QA pass), and specific, actionable findings naming exactly what must change to pass.',
 		parameters: {
 			type: Type.OBJECT,
 			properties: {
@@ -37,11 +37,12 @@ export const qaReviewBatchTool: AgentTool = {
 						properties: {
 							controlId: { type: Type.STRING },
 							stage: { type: Type.STRING, enum: VALID_STAGES },
+							controlText: { type: Type.STRING, description: 'The exact control/requirement text, as read from get_controls — QA checks the conclusion against this to catch scope drift onto anything the control itself does not actually specify.' },
 							conclusionText: { type: Type.STRING, description: 'The draft text from prepare_control_conclusion.' },
 							rating: { type: Type.STRING, description: 'The draft rating from prepare_control_conclusion.' },
 							evidenceReferences: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Same list echoed back by prepare_control_conclusion for this item.' },
 						},
-						required: ['controlId', 'stage', 'conclusionText', 'rating', 'evidenceReferences'],
+						required: ['controlId', 'stage', 'controlText', 'conclusionText', 'rating', 'evidenceReferences'],
 					},
 				},
 			},
@@ -68,12 +69,21 @@ export const qaReviewBatchTool: AgentTool = {
 			.map((it) => ({
 				controlId: str(it.controlId).trim(),
 				stage: str(it.stage) as DraftStage,
+				controlText: str(it.controlText),
 				conclusionText: str(it.conclusionText),
 				rating: str(it.rating),
 				evidenceReferences: Array.isArray(it.evidenceReferences) ? (it.evidenceReferences as unknown[]).filter((v): v is string => typeof v === 'string') : [],
 			}))
 			.filter((it) => it.controlId && VALID_STAGES.includes(it.stage) && it.conclusionText.trim() !== '');
-		if (items.length === 0) return { ok: false, output: { error: 'No valid items — each needs controlId, stage ("stage1"/"stage2"), and non-empty conclusionText.' }, summary: 'No valid items' };
+		if (items.length === 0) return { ok: false, output: { error: 'No valid items — each needs controlId, stage ("stage1"/"stage2"), controlText, and non-empty conclusionText.' }, summary: 'No valid items' };
+		const missingControlText = items.filter((it) => !it.controlText.trim());
+		if (missingControlText.length > 0) {
+			return {
+				ok: false,
+				output: { error: `controlText is required for every item so scope can be checked against it — missing for: ${missingControlText.map((it) => it.controlId).join(', ')}.` },
+				summary: 'Missing controlText',
+			};
+		}
 
 		const model = ctx.isBurnActive() ? ctx.plugin.settings.boostedModel.trim() || undefined : undefined;
 		const writingRules = { stage1: ctx.plugin.settings.defaultWritingRules, stage2: ctx.plugin.settings.defaultStage2WritingRules };

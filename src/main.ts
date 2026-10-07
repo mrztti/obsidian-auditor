@@ -536,57 +536,13 @@ export default class AuditorPlugin extends Plugin {
 
 	/**
 	 * The path a control record's note would be written to, based on its number — same naming
-	 * scheme `saveControlNote`/`importControlRecords` use. Exposed so the import flow can compute
-	 * collisions with existing notes before writing anything.
+	 * scheme `saveControlNote` uses. Exposed so the Excel link's sync-from-Excel direction can
+	 * compute where to create a note for a sheet row with no matching control yet.
 	 */
 	controlNotePath(record: ControlRecord): string {
 		const folder = this.settings.writtenControlsFolder;
 		const safeNumber = sanitizeFileTitle(record.number || 'Untitled control');
 		return normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
-	}
-
-	/**
-	 * Writes many control records in one go (used by the Excel import feature): unlike
-	 * `saveControlNote`, this does not open each note, and spot-indexes only the files actually
-	 * written here rather than rescanning the whole written-controls folder — importing 50 controls
-	 * into a folder of 2000 shouldn't re-walk the other 1950. When `overwrite` is false, filenames
-	 * that collide with an existing note get a numeric suffix instead of being touched; when true,
-	 * the existing note's content is replaced. Callers should confirm with the user (via
-	 * `controlNotePath`) before passing `overwrite`.
-	 */
-	async importControlRecords(records: ControlRecord[], overwrite = false): Promise<{ written: number; failed: { record: ControlRecord; error: string }[] }> {
-		const folder = this.settings.writtenControlsFolder;
-		const failed: { record: ControlRecord; error: string }[] = [];
-		const writtenFiles: TFile[] = [];
-		for (const record of records) {
-			try {
-				const content = buildControlNoteContent(record);
-				const directPath = this.controlNotePath(record);
-				const existing = this.app.vault.getAbstractFileByPath(directPath);
-				if (existing instanceof TFile) {
-					if (!overwrite) {
-						const base = sanitizeFileTitle(record.number || 'Untitled control');
-						let safeNumber = base;
-						let suffix = 1;
-						let path = directPath;
-						while (this.app.vault.getAbstractFileByPath(path)) {
-							safeNumber = `${base}-${++suffix}`;
-							path = normalizePath(folder ? `${folder}/${safeNumber}.md` : `${safeNumber}.md`);
-						}
-						writtenFiles.push(await this.app.vault.create(path, content));
-					} else {
-						await this.app.vault.modify(existing, content);
-						writtenFiles.push(existing);
-					}
-				} else {
-					writtenFiles.push(await this.app.vault.create(directPath, content));
-				}
-			} catch (e) {
-				failed.push({ record, error: String(e) });
-			}
-		}
-		void this.spotIndexFiles('writtenControls', writtenFiles);
-		return { written: writtenFiles.length, failed };
 	}
 
 	/** The path a session's plan-reference note lives at — one note per session, named after it, holding just the ordered list of its EGs' IDs. */

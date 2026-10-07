@@ -18,10 +18,11 @@ export const qaReviewTool: AgentTool = {
 				evidenceSummary: { type: Type.STRING, description: 'What the CURRENT evidence you retrieved this run actually shows, with sources (file/location) — not a restatement of the requirement.' },
 				ratingJustification: { type: Type.STRING, description: 'Why the rating you are about to propose follows from that evidence, specifically — not a generic statement.' },
 				citationsVerified: { type: Type.BOOLEAN, description: 'True only if you rechecked that every citation/reference in the drafted conclusion text corresponds to something you actually retrieved this run — no citation invented, no reference-report content cited as fact.' },
-				gaps: { type: Type.STRING, description: 'What is missing, uncertain, or not fully evidenced — empty string only if genuinely none.' },
-				passesQa: { type: Type.BOOLEAN, description: 'Your honest verdict: does this draft meet the writing conventions and rest entirely on verified current evidence? False if unsure.' },
+				staysWithinControlScope: { type: Type.BOOLEAN, description: 'True only if you reread the conclusion text against the requirement above sentence by sentence and confirmed every claim, observation, and recommendation addresses something THIS control actually specifies — nothing about a related-but-unspecified topic just because evidence happens to mention it. False if anything drifts out of scope.' },
+				gaps: { type: Type.STRING, description: 'What is missing, uncertain, or not fully evidenced — empty string only if genuinely none. If evidence does not clearly cover something the control requires, the conclusion text itself must say so explicitly ("no conclusion can be made on X") rather than inferring one — note here if it does not yet.' },
+				passesQa: { type: Type.BOOLEAN, description: 'Your honest verdict: does this draft meet the writing conventions, stay within the control\'s own scope, state gaps explicitly rather than inferring over them, and rest entirely on verified current evidence? False if unsure.' },
 			},
-			required: ['controlNumber', 'stage', 'requirement', 'evidenceSummary', 'ratingJustification', 'citationsVerified', 'gaps', 'passesQa'],
+			required: ['controlNumber', 'stage', 'requirement', 'evidenceSummary', 'ratingJustification', 'citationsVerified', 'staysWithinControlScope', 'gaps', 'passesQa'],
 		},
 	},
 	label: (a) => `QA review: ${str(a.controlNumber)} — ${STAGE_LABEL[str(a.stage) as DraftStage] ?? str(a.stage)}`,
@@ -31,7 +32,7 @@ export const qaReviewTool: AgentTool = {
 		if (!controlNumber) return Promise.resolve({ ok: false, output: { error: 'controlNumber is required.' }, summary: 'Missing control number' });
 		if (stage !== 'stage1' && stage !== 'stage2') return Promise.resolve({ ok: false, output: { error: 'stage must be "stage1" or "stage2".' }, summary: 'Invalid stage' });
 
-		const passes = args.passesQa === true && args.citationsVerified === true;
+		const passes = args.passesQa === true && args.citationsVerified === true && args.staysWithinControlScope === true;
 		if (passes) {
 			ctx.markQaReview(controlNumber, stage);
 			return Promise.resolve({
@@ -39,12 +40,16 @@ export const qaReviewTool: AgentTool = {
 				summary: `QA passed: ${controlNumber} — ${STAGE_LABEL[stage]}`,
 			});
 		}
-		const reason = args.citationsVerified !== true ? 'citations were not verified against what was actually retrieved' : 'the draft did not pass its own QA check';
+		const reasons: string[] = [];
+		if (args.citationsVerified !== true) reasons.push('citations were not verified against what was actually retrieved');
+		if (args.staysWithinControlScope !== true) reasons.push('the conclusion drifts onto something not actually specified by this control\'s own requirement text — narrow it to only what the control asks for');
+		if (reasons.length === 0) reasons.push('the draft did not pass its own QA check');
+		const reason = reasons.join('; ');
 		return Promise.resolve({
 			ok: false,
 			output: {
 				status: 'failed',
-				error: `QA did not pass (${reason}). Do not propose this yet — address it (more research, a corrected citation/rating/conclusion, or an honest gap statement) and call qa_review_conclusion again once it genuinely holds up.`,
+				error: `QA did not pass (${reason}). Do not propose this yet — address it (more research, a corrected citation/rating/conclusion, narrowing the conclusion back to the control's actual scope, or an honest gap statement instead of an inferred conclusion) and call qa_review_conclusion again once it genuinely holds up.`,
 			},
 			summary: `QA failed: ${controlNumber} — ${STAGE_LABEL[stage]} (${reason})`,
 		});

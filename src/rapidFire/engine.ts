@@ -368,6 +368,12 @@ export class RapidFireEngine {
 		const toQa = batch.items.filter((i) => i.state === 'ready_for_qa');
 		const maxPerCall = Math.max(1, this.plugin.settings.rapidFireMaxControlsPerModelCall);
 
+		// QA must see each item's own control text to check it hasn't drawn conclusions about
+		// anything the control itself doesn't actually specify — loaded once up front rather than
+		// per group/chunk.
+		const { found: controlsForQa } = await this.controls.load([...new Set(toQa.map((i) => i.controlNumber))]);
+		const controlTextByNumber = new Map(controlsForQa.map((e) => [e.record.number, e.record.control]));
+
 		// FR-8.6 Phase 4 process step 1: group by topic (batchId), stage, and (implicitly) the one configured style profile.
 		const groups = new Map<string, RapidFireItem[]>();
 		for (const item of toQa) {
@@ -384,6 +390,7 @@ export class RapidFireEngine {
 				const items = chunk.map((item) => ({
 					controlId: item.controlNumber,
 					stage: item.stage,
+					controlText: controlTextByNumber.get(item.controlNumber) ?? '',
 					conclusionText: item.draftConclusion ?? '',
 					rating: item.draftRating ?? '',
 					// Cross-control contamination (FR-8.6 step 4) is caught because same-topic items are
@@ -420,7 +427,14 @@ export class RapidFireEngine {
 				if (!redrafted) { this.block(item, 'Redraft after QA failure did not succeed', host); continue; }
 				const model = this.plugin.settings.boostedModel.trim() || undefined; // already escalated by the failure itself
 				const { results, usage } = await this.callModel(() => this.plugin.geminiGenerate.qaReviewConclusionsBatch(
-					[{ controlId: item.controlNumber, stage: item.stage, conclusionText: item.draftConclusion ?? '', rating: item.draftRating ?? '', evidenceReferences: item.evidenceReferences ?? [] }],
+					[{
+						controlId: item.controlNumber,
+						stage: item.stage,
+						controlText: byNumber.get(item.controlNumber)?.control ?? '',
+						conclusionText: item.draftConclusion ?? '',
+						rating: item.draftRating ?? '',
+						evidenceReferences: item.evidenceReferences ?? [],
+					}],
 					writingRules,
 					profile,
 					model,

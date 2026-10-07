@@ -321,6 +321,8 @@ const PREPARED_CONCLUSION_SCHEMA: Schema = {
 export interface QaBatchItemInput {
 	controlId: string;
 	stage: DraftStage;
+	/** The control's own requirement text — QA checks the conclusion stays within what THIS actually specifies, never drifting onto related-but-unspecified topics. */
+	controlText: string;
 	conclusionText: string;
 	rating: string;
 	evidenceReferences: string[];
@@ -333,7 +335,7 @@ export interface QaBatchItemResult {
 	pass: boolean;
 	correctedConclusionText: string;
 	correctedRating: string;
-	/** Specific issues found (evidence alignment, unsupported claims, structure, style, prohibited wording, reference correctness) — empty only if genuinely none. */
+	/** Specific, actionable issues found (evidence alignment, unsupported claims, structure, style, prohibited wording, reference correctness, scope precision) — each one names exactly what in the conclusion must change to pass, not just that something is wrong. Empty only if genuinely none. */
 	findings: string[];
 }
 
@@ -1148,6 +1150,17 @@ export class GeminiGenerate {
 			'what was provided (e.g. "assumed the named policy document is still current"). Both arrays',
 			'must be empty only when genuinely nothing applies — never omit a known gap to look complete.',
 			'',
+			'CRITICAL — scope precision: address ONLY what the control text below actually specifies. Do',
+			'NOT draw conclusions, observations, or recommendations about a related-but-unspecified topic',
+			'just because the evidence happens to mention it — if it is not something THIS control',
+			'requires, leave it out entirely rather than commenting on it.',
+			'',
+			'CRITICAL — transparency over inference: where the evidence does not clearly cover a point the',
+			'control DOES require, say so explicitly in the conclusion text (e.g. "no conclusion can be',
+			'made on X due to insufficient evidence") rather than presenting an inferred or assumed',
+			'conclusion as settled fact. A stated gap is always preferable to a hallucinated conclusion —',
+			'never extrapolate from adjacent or loosely related evidence to fill a gap.',
+			'',
 			'Writing rules:',
 			writingRules,
 			'',
@@ -1193,6 +1206,8 @@ export class GeminiGenerate {
 		const itemsBlock = items
 			.map((it, i) => [
 				`[${i}] Control ${it.controlId} — ${it.stage}`,
+				'Control/requirement text (the ONLY thing this conclusion may draw conclusions about):',
+				it.controlText,
 				`Rating: ${it.rating}`,
 				`Evidence references: ${it.evidenceReferences.join(', ') || '(none listed)'}`,
 				'Conclusion text:',
@@ -1205,6 +1220,18 @@ export class GeminiGenerate {
 			`against the configured writing-style profile "${profile.name}" (version ${profile.version}).`,
 			'This is a genuine, separate check — not a restatement of the draft. For EACH item, by its',
 			'[index], verify:',
+			'- Scope precision (CRITICAL, check this first): the conclusion addresses ONLY what that',
+			'  item\'s own control/requirement text actually specifies. Fail the item if it draws any',
+			'  conclusion, observation, finding, or recommendation about a related-but-unspecified topic —',
+			'  even one the evidence happens to mention — that the control text itself does not require.',
+			'  Quote the offending sentence(s) in the finding and state plainly that they are out of scope',
+			'  and must be removed or narrowed in the corrected text.',
+			'- Honest "no conclusion possible" over inference: if the evidence does not clearly cover a',
+			'  point the control DOES require, the conclusion text must say so explicitly (e.g. "no',
+			'  conclusion can be made on X due to insufficient evidence") rather than presenting an',
+			'  inferred or assumed conclusion as settled fact. Fail any item that states something as',
+			'  fact by inferring/extrapolating from adjacent evidence instead of being explicit about the',
+			'  gap — precision and transparency about what is NOT known matters as much as what is.',
 			'- Evidence alignment: every claim is actually supported by the listed evidence references.',
 			'- No unsupported claims: nothing stated as fact beyond what the evidence references show.',
 			'- Internal consistency: the rating matches what the conclusion text itself describes.',
@@ -1220,7 +1247,9 @@ export class GeminiGenerate {
 			'',
 			'For each item, return pass/fail, a corrected version of the conclusion text and rating (the',
 			'SAME text/rating as the input when nothing needed to change — never leave these blank), and',
-			'the specific findings that justify the verdict (empty array only if genuinely none).',
+			'the specific findings that justify the verdict (empty array only if genuinely none). Every',
+			'finding must be ACTIONABLE: name exactly what in the conclusion text has to change — which',
+			'sentence, what it should say instead or be replaced with — not just that something is wrong.',
 			'',
 			'Writing-style rules:',
 			rulesBlock,
@@ -1337,6 +1366,15 @@ export class GeminiGenerate {
 			'another entry\'s facts, even though they appear in the same batch below. If an item\'s facts',
 			'are thin or absent, its rating and unresolvedIssues must reflect that honestly rather than',
 			'borrowing confidence from a different item.',
+			'',
+			'CRITICAL — scope precision: address ONLY what that entry\'s own control text actually',
+			'specifies. Do NOT draw conclusions, observations, or recommendations about a',
+			'related-but-unspecified topic just because the evidence facts happen to mention it.',
+			'',
+			'CRITICAL — transparency over inference: where the mapped evidence facts do not clearly cover',
+			'a point the control requires, say so explicitly in the conclusion text (e.g. "no conclusion',
+			'can be made on X due to insufficient evidence") rather than presenting an inferred conclusion',
+			'as settled fact. A stated gap always beats a hallucinated conclusion.',
 			'',
 			'You MUST follow the writing rules below exactly for phrasing and structure.',
 			'',

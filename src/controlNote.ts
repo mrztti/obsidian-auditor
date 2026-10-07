@@ -51,6 +51,22 @@ export const CONTROL_FIELD_KEYS = [
 
 export type ControlFieldKey = typeof CONTROL_FIELD_KEYS[number];
 
+/** Human-readable label per mappable field — shared by the Excel import wizard and the Excel link's column-mapping UI, so both present the exact same field list the exact same way. */
+export const CONTROL_FIELD_LABELS: Record<ControlFieldKey, string> = {
+	number: 'Control number',
+	standard: 'Standard',
+	topic: 'Topic',
+	control: 'Control',
+	auditGuidance: 'Audit guidance',
+	session: 'Session',
+	assignedMember: 'Assigned member',
+	status: 'Status',
+	todConclusion: 'ToD conclusion',
+	todRating: 'ToD rating',
+	toeConclusion: 'ToE conclusion',
+	toeRating: 'ToE rating',
+};
+
 export function emptyControlRecord(number = ''): ControlRecord {
 	return {
 		number,
