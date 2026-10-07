@@ -18,6 +18,7 @@ declare module 'xlsx-populate' {
 		value(value: string | number | boolean | Date | RichText | null): Cell;
 		rowNumber(): number;
 		columnNumber(): number;
+		columnName(): string;
 		style(name: string): unknown;
 		style(names: string[]): Record<string, unknown>;
 		style(name: string, value: unknown): Cell;

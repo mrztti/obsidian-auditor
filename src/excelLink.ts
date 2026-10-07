@@ -176,6 +176,8 @@ export interface SyncToExcelResult {
 	updated: number;
 	/** Control numbers that exist in the vault but have no matching row in the sheet — never appended, per the Excel link's "lookup only" contract. */
 	notInSheet: number;
+	/** TEMPORARY diagnostic (remove once the "conclusions not written" issue is root-caused): a few sample conclusion writes, so what's actually read from the vault and computed for the cell can be inspected directly. */
+	conclusionSamples: { controlNumber: string; field: string; rawLength: number; rawPreview: string; wroteRichText: boolean; targetAddress: string }[];
 }
 
 /**
@@ -216,16 +218,29 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 	const entries = await new ControlStore(plugin).listAll();
 	let updated = 0;
 	let notInSheet = 0;
+	const conclusionSamples: SyncToExcelResult['conclusionSamples'] = [];
 	for (const entry of entries) {
 		const record = entry.record;
 		const rowNumber = rowByNumber.get(record.number.trim());
 		if (!rowNumber) { notInSheet++; continue; }
 		for (const { field, col } of mappedCols) {
 			const cell = sheet.cell(rowNumber, col);
-			const value = field === 'todConclusion' || field === 'toeConclusion'
+			const isConclusion = field === 'todConclusion' || field === 'toeConclusion';
+			const value = isConclusion
 				? buildConclusionCellValue(record[field], readCellFontStyle(cell))
 				: sanitizeForExcel(record[field]);
 			cell.value(value);
+			if (isConclusion && conclusionSamples.length < 3) {
+				const raw = record[field];
+				conclusionSamples.push({
+					controlNumber: record.number,
+					field,
+					rawLength: raw.length,
+					rawPreview: raw.slice(0, 80),
+					wroteRichText: typeof value !== 'string',
+					targetAddress: `${sheet.name()}!${cell.columnName()}${rowNumber}`,
+				});
+			}
 		}
 		updated++;
 	}
@@ -234,7 +249,7 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 		const out = await workbook.outputAsync({ type: 'arraybuffer' }) as ArrayBuffer;
 		await plugin.app.vault.modifyBinary(file, out);
 	}
-	return { updated, notInSheet };
+	return { updated, notInSheet, conclusionSamples };
 }
 
 export interface SyncFromExcelResult {

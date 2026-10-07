@@ -433,7 +433,14 @@ export class ControlsView extends ItemView {
 				syncToExcelBtn.disabled = true;
 				try {
 					const result = await syncToExcel(this.plugin);
-					new Notice(`Auditor: synced to Excel — ${result.updated} row(s) updated${result.notInSheet > 0 ? `, ${result.notInSheet} control(s) not found in the sheet (skipped)` : ''}.`);
+					const samplesText = result.conclusionSamples
+						.map((s) => `${s.controlNumber}/${s.field} → ${s.targetAddress}: len=${s.rawLength}, richText=${s.wroteRichText}, "${s.rawPreview}"`)
+						.join(' | ');
+					new Notice(
+						`Auditor: synced to Excel — ${result.updated} row(s) updated${result.notInSheet > 0 ? `, ${result.notInSheet} control(s) not found in the sheet (skipped)` : ''}.` +
+						(samplesText ? ` Conclusion samples: ${samplesText}` : ' No conclusion fields were mapped/written.'),
+						0,
+					);
 				} catch (e) {
 					new Notice(`Auditor: sync to Excel failed — ${String(e)}`);
 				} finally {
