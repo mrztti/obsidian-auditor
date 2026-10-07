@@ -438,7 +438,8 @@ export class ControlsView extends ItemView {
 						.join(' | ');
 					new Notice(
 						`Auditor: synced to Excel — ${result.updated} row(s) updated${result.notInSheet > 0 ? `, ${result.notInSheet} control(s) not found in the sheet (skipped)` : ''}.` +
-						(samplesText ? ` Conclusion samples: ${samplesText}` : ' No conclusion fields were mapped/written.'),
+						(samplesText ? ` Conclusion samples: ${samplesText}` : ' No conclusion fields were mapped/written.') +
+						` Mapping: ${result.mappingDiagnostic.join(', ')}`,
 						0,
 					);
 				} catch (e) {

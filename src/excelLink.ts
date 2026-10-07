@@ -63,11 +63,21 @@ function excelFile(plugin: AuditorPlugin, config: ExcelLinkConfig): TFile {
 	return file;
 }
 
-/** Live header-text -> column-number map, read directly off the sheet's header row every time rather than trusting a stale snapshot — so a column the user reordered or inserted in Excel is still found correctly. */
+/**
+ * Live header-text -> column-number map, read directly off the sheet's header row every time
+ * rather than trusting a stale snapshot — so a column the user reordered or inserted in Excel is
+ * still found correctly. The scan bound is the sheet's own actual used-range width (whatever that
+ * is), with `MAX_HEADER_SCAN_COLUMNS` only as a floor — a fixed 200-column cap previously meant a
+ * header sitting further right (common for a wide template that puts long free-text columns like
+ * the conclusion fields after many short metadata/rating columns) was silently never found at all,
+ * with no error — it just never ended up in `mappedCols`, so nothing was ever written there.
+ */
 function headerColumnMap(sheet: Sheet, headerRowNumber: number): Map<string, number> {
 	const row = sheet.row(headerRowNumber);
+	const used = sheet.usedRange();
+	const scanTo = Math.max(MAX_HEADER_SCAN_COLUMNS, used ? used.endCell().columnNumber() : 0);
 	const map = new Map<string, number>();
-	for (let col = 1; col <= MAX_HEADER_SCAN_COLUMNS; col++) {
+	for (let col = 1; col <= scanTo; col++) {
 		const text = cellValueToString(row.cell(col).value()).trim();
 		if (text) map.set(text, col);
 	}
@@ -178,6 +188,8 @@ export interface SyncToExcelResult {
 	notInSheet: number;
 	/** TEMPORARY diagnostic (remove once the "conclusions not written" issue is root-caused): a few sample conclusion writes, so what's actually read from the vault and computed for the cell can be inspected directly. */
 	conclusionSamples: { controlNumber: string; field: string; rawLength: number; rawPreview: string; wroteRichText: boolean; targetAddress: string }[];
+	/** TEMPORARY diagnostic: every mapped field, its configured header, and the column it actually resolved to (or "NOT FOUND") — shows exactly what config.mapping holds at sync time. */
+	mappingDiagnostic: string[];
 }
 
 /**
@@ -201,11 +213,14 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 	if (!keyCol) throw new Error(`Key column "${config.keyColumn}" was not found on the header row of "${config.sheetName}".`);
 
 	const mappedCols: { field: ControlFieldKey; col: number }[] = [];
+	// TEMPORARY diagnostic (remove once the "conclusions not written" issue is root-caused).
+	const mappingDiagnostic: string[] = [];
 	for (const field of CONTROL_FIELD_KEYS) {
 		const header = config.mapping[field];
 		if (!header) continue;
 		const col = columns.get(header);
 		if (col) mappedCols.push({ field, col });
+		mappingDiagnostic.push(`${field}="${header}"→${col ?? 'NOT FOUND'}`);
 	}
 
 	const endRow = lastUsedRow(sheet);
@@ -249,7 +264,7 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 		const out = await workbook.outputAsync({ type: 'arraybuffer' }) as ArrayBuffer;
 		await plugin.app.vault.modifyBinary(file, out);
 	}
-	return { updated, notInSheet, conclusionSamples };
+	return { updated, notInSheet, conclusionSamples, mappingDiagnostic };
 }
 
 export interface SyncFromExcelResult {
