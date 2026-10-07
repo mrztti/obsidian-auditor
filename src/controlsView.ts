@@ -356,11 +356,7 @@ export class ControlsView extends ItemView {
 				);
 			const entries: { file: TFile; record: ControlRecord }[] = [];
 			for (const file of files) {
-				// `vault.read` (not `cachedRead`) deliberately: this view is reloaded right after
-				// programmatic writes (Excel sync, rapid fire, agent edits) that don't always go through
-				// an editor pane, and `cachedRead` can keep serving the pre-write cached content in that
-				// case — exactly the "control shows the old rating even though the file changed" bug.
-				const content = await this.app.vault.read(file);
+				const content = await this.app.vault.cachedRead(file);
 				entries.push({ file, record: parseControlNoteContent(content, file.basename) });
 			}
 			entries.sort((a, b) => a.record.number.localeCompare(b.record.number, undefined, { numeric: true }));
