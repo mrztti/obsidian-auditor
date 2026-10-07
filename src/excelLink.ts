@@ -39,6 +39,24 @@ function cellValueToString(value: string | number | boolean | Date | InstanceTyp
 	return String(value);
 }
 
+/**
+ * XML 1.0 (what sharedStrings.xml and every worksheet XML is) forbids most ASCII control
+ * characters outright (`Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] |
+ * [#x10000-#x10FFFF]`) and unpaired surrogates. Written text here ultimately comes from drafted
+ * conclusions and whatever the source evidence/PDF extraction produced, which can silently carry a
+ * stray NUL, form feed, or similar byte without it being visible anywhere in the UI — a single one
+ * is enough for Excel to refuse the file outright ("we found a problem with some content") and
+ * discard whole sheets while "recovering" it. Every string actually written to a cell is sanitized
+ * through this first, rather than trusting the source was already clean.
+ */
+// eslint-disable-next-line no-control-regex -- stripping these control characters is the entire point
+const ILLEGAL_XML_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F￾￿]/g;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/g;
+
+function sanitizeForExcel(text: string): string {
+	return text.replace(ILLEGAL_XML_CHARS, '').replace(LONE_SURROGATE, (m) => m.slice(0, -1));
+}
+
 function excelFile(plugin: AuditorPlugin, config: ExcelLinkConfig): TFile {
 	const file = plugin.app.vault.getAbstractFileByPath(config.filePath);
 	if (!(file instanceof TFile)) throw new Error(`Linked spreadsheet "${config.filePath}" was not found in the vault.`);
@@ -140,7 +158,7 @@ function readCellFontStyle(cell: Cell): Record<string, unknown> {
  * included.
  */
 function buildConclusionCellValue(text: string, baseFontStyle: Record<string, unknown>): string | InstanceType<typeof XlsxPopulate.RichText> {
-	const { finalText, boldRanges } = enforceSectionSpacing(text);
+	const { finalText, boldRanges } = enforceSectionSpacing(sanitizeForExcel(text));
 	if (boldRanges.length === 0) return finalText;
 	const richText = new XlsxPopulate.RichText();
 	let pos = 0;
@@ -206,7 +224,7 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 			const cell = sheet.cell(rowNumber, col);
 			const value = field === 'todConclusion' || field === 'toeConclusion'
 				? buildConclusionCellValue(record[field], readCellFontStyle(cell))
-				: record[field];
+				: sanitizeForExcel(record[field]);
 			cell.value(value);
 		}
 		updated++;
