@@ -13,13 +13,11 @@ import {
 import type { ExcelLinkConfig } from './settings';
 import { readWorkbookPreview, readWorkbookRows } from './controlImport';
 
-const MAX_HEADER_SCAN_COLUMNS = 200;
-
 export function isExcelLinkConfigured(config: ExcelLinkConfig): boolean {
-	return config.filePath.trim() !== '' && config.sheetName.trim() !== '' && config.headerRowNumber > 0 && config.keyColumn.trim() !== '';
+	return config.filePath.trim() !== '' && config.sheetName.trim() !== '' && config.headerRowNumber > 0 && config.keyColumn > 0;
 }
 
-/** Turns free-text rating cells (e.g. "Non-conformant", "Conform w/ observation") into the canonical rating code. Shared by the one-shot import wizard and the Excel link's sync-from-Excel direction. */
+/** Turns free-text rating cells (e.g. "Non-conformant", "Conform w/ observation") into the canonical rating code. */
 export function normalizeRating(raw: string): ControlRating {
 	const v = raw.trim();
 	if (v === 'C' || v === 'C*' || v === 'NC' || v === '-') return v;
@@ -61,27 +59,6 @@ function excelFile(plugin: AuditorPlugin, config: ExcelLinkConfig): TFile {
 	const file = plugin.app.vault.getAbstractFileByPath(config.filePath);
 	if (!(file instanceof TFile)) throw new Error(`Linked spreadsheet "${config.filePath}" was not found in the vault.`);
 	return file;
-}
-
-/**
- * Live header-text -> column-number map, read directly off the sheet's header row every time
- * rather than trusting a stale snapshot — so a column the user reordered or inserted in Excel is
- * still found correctly. The scan bound is the sheet's own actual used-range width (whatever that
- * is), with `MAX_HEADER_SCAN_COLUMNS` only as a floor — a fixed 200-column cap previously meant a
- * header sitting further right (common for a wide template that puts long free-text columns like
- * the conclusion fields after many short metadata/rating columns) was silently never found at all,
- * with no error — it just never ended up in `mappedCols`, so nothing was ever written there.
- */
-function headerColumnMap(sheet: Sheet, headerRowNumber: number): Map<string, number> {
-	const row = sheet.row(headerRowNumber);
-	const used = sheet.usedRange();
-	const scanTo = Math.max(MAX_HEADER_SCAN_COLUMNS, used ? used.endCell().columnNumber() : 0);
-	const map = new Map<string, number>();
-	for (let col = 1; col <= scanTo; col++) {
-		const text = cellValueToString(row.cell(col).value()).trim();
-		if (text) map.set(text, col);
-	}
-	return map;
 }
 
 function lastUsedRow(sheet: Sheet): number {
@@ -186,17 +163,16 @@ export interface SyncToExcelResult {
 	updated: number;
 	/** Control numbers that exist in the vault but have no matching row in the sheet — never appended, per the Excel link's "lookup only" contract. */
 	notInSheet: number;
-	/** TEMPORARY diagnostic (remove once the "conclusions not written" issue is root-caused): a few sample conclusion writes, so what's actually read from the vault and computed for the cell can be inspected directly. */
-	conclusionSamples: { controlNumber: string; field: string; rawLength: number; rawPreview: string; wroteRichText: boolean; targetAddress: string }[];
-	/** TEMPORARY diagnostic: every mapped field, its configured header, and the column it actually resolved to (or "NOT FOUND") — shows exactly what config.mapping holds at sync time. */
-	mappingDiagnostic: string[];
 }
 
 /**
  * Writes every mapped field of every vault control into the linked sheet, matched to a row purely
  * by control-number lookup against `keyColumn` — never inserting, reordering, or restyling rows.
  * Only the specific cells named in `config.mapping` ever have `.value()` called on them, so every
- * other cell's formatting, formulas, and content are left completely untouched.
+ * other cell's formatting, formulas, and content are left completely untouched. Columns are
+ * addressed purely by their persisted column NUMBER (see `ExcelLinkConfig`) — never by re-reading
+ * header text, which can't be trusted to match byte-for-byte (e.g. a wrapped header cell carries an
+ * embedded line break that will never again match whatever was captured at configuration time).
  */
 export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelResult> {
 	const config = plugin.settings.excelLink;
@@ -208,54 +184,32 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 	const sheet = workbook.sheet(config.sheetName);
 	if (!sheet) throw new Error(`Sheet "${config.sheetName}" was not found in "${config.filePath}".`);
 
-	const columns = headerColumnMap(sheet, config.headerRowNumber);
-	const keyCol = columns.get(config.keyColumn);
-	if (!keyCol) throw new Error(`Key column "${config.keyColumn}" was not found on the header row of "${config.sheetName}".`);
-
 	const mappedCols: { field: ControlFieldKey; col: number }[] = [];
-	// TEMPORARY diagnostic (remove once the "conclusions not written" issue is root-caused).
-	const mappingDiagnostic: string[] = [];
 	for (const field of CONTROL_FIELD_KEYS) {
-		const header = config.mapping[field];
-		if (!header) continue;
-		const col = columns.get(header);
+		const col = config.mapping[field];
 		if (col) mappedCols.push({ field, col });
-		mappingDiagnostic.push(`${field}="${header}"→${col ?? 'NOT FOUND'}`);
 	}
 
 	const endRow = lastUsedRow(sheet);
 	const rowByNumber = new Map<string, number>();
 	for (let r = config.headerRowNumber + 1; r <= endRow; r++) {
-		const key = cellValueToString(sheet.cell(r, keyCol).value()).trim();
+		const key = cellValueToString(sheet.cell(r, config.keyColumn).value()).trim();
 		if (key) rowByNumber.set(key, r);
 	}
 
 	const entries = await new ControlStore(plugin).listAll();
 	let updated = 0;
 	let notInSheet = 0;
-	const conclusionSamples: SyncToExcelResult['conclusionSamples'] = [];
 	for (const entry of entries) {
 		const record = entry.record;
 		const rowNumber = rowByNumber.get(record.number.trim());
 		if (!rowNumber) { notInSheet++; continue; }
 		for (const { field, col } of mappedCols) {
 			const cell = sheet.cell(rowNumber, col);
-			const isConclusion = field === 'todConclusion' || field === 'toeConclusion';
-			const value = isConclusion
+			const value = field === 'todConclusion' || field === 'toeConclusion'
 				? buildConclusionCellValue(record[field], readCellFontStyle(cell))
 				: sanitizeForExcel(record[field]);
 			cell.value(value);
-			if (isConclusion && conclusionSamples.length < 3) {
-				const raw = record[field];
-				conclusionSamples.push({
-					controlNumber: record.number,
-					field,
-					rawLength: raw.length,
-					rawPreview: raw.slice(0, 80),
-					wroteRichText: typeof value !== 'string',
-					targetAddress: `${sheet.name()}!${cell.columnName()}${rowNumber}`,
-				});
-			}
 		}
 		updated++;
 	}
@@ -264,7 +218,7 @@ export async function syncToExcel(plugin: AuditorPlugin): Promise<SyncToExcelRes
 		const out = await workbook.outputAsync({ type: 'arraybuffer' }) as ArrayBuffer;
 		await plugin.app.vault.modifyBinary(file, out);
 	}
-	return { updated, notInSheet, conclusionSamples, mappingDiagnostic };
+	return { updated, notInSheet };
 }
 
 export interface SyncFromExcelResult {
@@ -273,12 +227,49 @@ export interface SyncFromExcelResult {
 	failed: { number: string; error: string }[];
 }
 
+export interface SyncFromExcelPreview {
+	/** Control numbers that already have a note — syncing will OVERWRITE their mapped fields. */
+	toOverwrite: string[];
+	/** Control numbers with no existing note — syncing will create them fresh. */
+	toCreate: number;
+}
+
+/**
+ * Looks at what `syncFromExcel` would do, without writing anything — specifically how many existing
+ * control notes would be overwritten — so the caller can confirm with the user before an
+ * irreversible bulk overwrite happens.
+ */
+export async function previewSyncFromExcel(plugin: AuditorPlugin): Promise<SyncFromExcelPreview> {
+	const config = plugin.settings.excelLink;
+	if (!isExcelLinkConfigured(config)) throw new Error('No Excel link is configured yet.');
+
+	const file = excelFile(plugin, config);
+	const rows = await readWorkbookRows(plugin.app.vault, file, config.sheetName, config.headerRowNumber);
+	const preview = await readWorkbookPreview(plugin.app.vault, file, config.sheetName, config.headerRowNumber);
+	const keyIndex = config.keyColumn - preview.startColumn;
+	const gateIndex = config.gateColumn ? config.gateColumn - preview.startColumn : undefined;
+
+	const byNumber = new Map((await new ControlStore(plugin).listAll()).map((e) => [e.record.number.trim(), e]));
+
+	const toOverwrite: string[] = [];
+	let toCreate = 0;
+	for (const row of rows) {
+		const number = (row[keyIndex] ?? '').trim();
+		if (!number) continue;
+		if (gateIndex !== undefined && !(row[gateIndex] ?? '').trim()) continue;
+		if (byNumber.has(number)) toOverwrite.push(number);
+		else toCreate++;
+	}
+	return { toOverwrite, toCreate };
+}
+
 /**
  * Reads every mapped field from the linked sheet (via the same exceljs-based reader the one-shot
- * import wizard uses) and merges it into the matching vault control note, looked up by
- * `keyColumn`'s value — a control note not already in the vault is created instead. Unlike the
+ * import wizard used to use) and merges it into the matching vault control note, looked up by
+ * `keyColumn`'s value — a control note not already in the vault is created instead. Unlike a
  * one-shot import, fields NOT included in `config.mapping` are left exactly as they are on the
- * existing note (e.g. comments, audit guidance) rather than being blanked out.
+ * existing note (e.g. comments, audit guidance) rather than being blanked out. Columns are
+ * addressed by their persisted column NUMBER — see `syncToExcel`'s doc comment for why.
  */
 export async function syncFromExcel(plugin: AuditorPlugin): Promise<SyncFromExcelResult> {
 	const config = plugin.settings.excelLink;
@@ -288,15 +279,15 @@ export async function syncFromExcel(plugin: AuditorPlugin): Promise<SyncFromExce
 	// The header ROW is pinned to what was confirmed at configuration time (`config.headerRowNumber`)
 	// rather than re-detected here — otherwise a sync could silently land on a different row than the
 	// one the user actually mapped, if the auto-detection heuristic is ever ambiguous for this sheet
-	// (e.g. a banner/title row above the real header). Column POSITIONS within that row are still
-	// re-read live (not trusted from settings), so a column the user reordered in Excel is still
-	// matched by name.
+	// (e.g. a banner/title row above the real header).
 	const rows = await readWorkbookRows(plugin.app.vault, file, config.sheetName, config.headerRowNumber);
 	const preview = await readWorkbookPreview(plugin.app.vault, file, config.sheetName, config.headerRowNumber);
-	const columnIndex = new Map(preview.headers.map((h, i) => [h, i]));
-	const keyIndex = columnIndex.get(config.keyColumn);
-	if (keyIndex === undefined) throw new Error(`Key column "${config.keyColumn}" was not found on the header row of "${config.sheetName}".`);
-	const gateIndex = config.gateColumn ? columnIndex.get(config.gateColumn) : undefined;
+	// `rows[r][i]` corresponds to absolute column `preview.startColumn + i` — a defined Excel Table
+	// can anchor anywhere on the sheet, so the row arrays are not always aligned to column 1.
+	const colIndex = (columnNumber: number): number => columnNumber - preview.startColumn;
+
+	const keyIndex = colIndex(config.keyColumn);
+	const gateIndex = config.gateColumn ? colIndex(config.gateColumn) : undefined;
 
 	const controlStore = new ControlStore(plugin);
 	const byNumber = new Map((await controlStore.listAll()).map((e) => [e.record.number.trim(), e]));
@@ -314,11 +305,9 @@ export async function syncFromExcel(plugin: AuditorPlugin): Promise<SyncFromExce
 			const existing = byNumber.get(number);
 			const base: ControlRecord = existing ? { ...existing.record, comments: [...existing.record.comments] } : emptyControlRecord(number);
 			for (const field of CONTROL_FIELD_KEYS) {
-				const header = config.mapping[field];
-				if (!header) continue;
-				const index = columnIndex.get(header);
-				if (index === undefined) continue;
-				const raw = row[index] ?? '';
+				const col = config.mapping[field];
+				if (!col) continue;
+				const raw = row[colIndex(col)] ?? '';
 				if (field === 'todRating' || field === 'toeRating') base[field] = normalizeRating(raw);
 				else (base as unknown as Record<string, string>)[field] = raw;
 			}

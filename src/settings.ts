@@ -32,11 +32,13 @@ export const EMPTY_WRITING_STYLE_PROFILE: WritingStyleProfile = {
 
 /**
  * Persisted bidirectional link between the vault's written controls and one sheet of one vault
- * .xlsx file, keyed by header NAME rather than column number — so if the user reorders/inserts a
- * column in Excel, the next sync still finds the right one by its header text instead of silently
- * writing into the wrong column. `headerRowNumber` is the one positional fact worth freezing (where
- * the header row itself sits), since re-sniffing it on every sync risks picking a different row if a
- * banner/title row above it changes.
+ * .xlsx file, keyed by 1-based COLUMN NUMBER rather than header text — header-text matching turned
+ * out to be fragile in practice (a header cell wrapped across two visual lines persists with an
+ * embedded line break, which then never matches anything live; duplicate header text across
+ * columns is also not uncommon in real templates). A column number is unambiguous and immune to
+ * both. The tradeoff is explicit: if columns are reordered/inserted in Excel after this link is
+ * configured, it must be reconfigured — re-running "Configure Excel link" re-reads the header row
+ * so the user can re-pick columns by their (current) label.
  */
 export interface ExcelLinkConfig {
 	/** Vault path to the linked .xlsx/.xls file. Empty = link not configured. */
@@ -44,25 +46,25 @@ export interface ExcelLinkConfig {
 	sheetName: string;
 	/** 1-based row number the column headers live on. */
 	headerRowNumber: number;
-	/** Header text of the column used to match a sheet row to a control note, both directions. */
-	keyColumn: string;
+	/** 1-based column number used to match a sheet row to a control note, both directions. 0 = unset. */
+	keyColumn: number;
 	/**
-	 * Optional header text of a column that gates sync-FROM-Excel: a sheet row is only synced
-	 * (updating or creating its control note) when this column is non-empty on that row. Empty =
+	 * Optional 1-based column number that gates sync-FROM-Excel: a sheet row is only synced
+	 * (updating or creating its control note) when this column is non-empty on that row. 0 = none —
 	 * every row with a key value is synced. Same idea as the one-shot import wizard's "Import gate
 	 * column", carried over here so the Excel link doesn't lose that control.
 	 */
-	gateColumn: string;
-	/** Field -> header text. A field absent here is never read from or written to the sheet. */
-	mapping: Partial<Record<ControlFieldKey, string>>;
+	gateColumn: number;
+	/** Field -> 1-based column number. A field absent here is never read from or written to the sheet. */
+	mapping: Partial<Record<ControlFieldKey, number>>;
 }
 
 export const EMPTY_EXCEL_LINK: ExcelLinkConfig = {
 	filePath: '',
 	sheetName: '',
 	headerRowNumber: 0,
-	keyColumn: '',
-	gateColumn: '',
+	keyColumn: 0,
+	gateColumn: 0,
 	mapping: {},
 };
 

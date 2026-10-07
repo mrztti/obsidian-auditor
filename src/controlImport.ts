@@ -11,6 +11,8 @@ export interface WorkbookPreview {
 	sampleRows: string[][];
 	/** 1-based row number the header was found on — persisted by the Excel link so it can address the same row directly on later syncs without re-sniffing. */
 	headerRowNumber: number;
+	/** 1-based column number that `headers[0]`/`sampleRows[r][0]` corresponds to — a defined Excel Table can anchor anywhere on the sheet, so `headers`/row arrays are NOT always aligned to column 1. The Excel link's column-number-based mapping (immune to header text issues like embedded line breaks or duplicate names) depends on this to convert its stored column numbers into array indices: `index = columnNumber - startColumn`. */
+	startColumn: number;
 }
 
 export function cellToString(value: unknown): string {
@@ -51,6 +53,7 @@ interface TabularData {
 	headers: string[];
 	rows: string[][];
 	headerRowNumber: number;
+	startColumn: number;
 }
 
 interface RawTableModel {
@@ -101,7 +104,7 @@ function extractFromDefinedTable(sheet: ExcelJS.Worksheet): TabularData | null {
 		if (values.every((v) => v.trim() === '')) continue;
 		rows.push(values);
 	}
-	return { headers, rows, headerRowNumber: startRow };
+	return { headers, rows, headerRowNumber: startRow, startColumn: startCol };
 }
 
 /** True for a cell that isn't part of a merge, or is the top-left ("master") cell of one — used so a merged banner cell isn't counted once per column it spans. */
@@ -142,7 +145,7 @@ function extractFromRange(sheet: ExcelJS.Worksheet, headerRowOverride?: number):
 		const values = headers.map((_, i) => cellToString(row.getCell(i + 1).value));
 		if (values.some((v) => v.trim() !== '')) rows.push(values);
 	}
-	return { headers, rows, headerRowNumber };
+	return { headers, rows, headerRowNumber, startColumn: 1 };
 }
 
 /**
@@ -160,11 +163,11 @@ function extractTabularData(sheet: ExcelJS.Worksheet, headerRowOverride?: number
 /** Reads only the header row and up to MAX_PREVIEW_ROWS data rows of the given sheet — shown to the user while they manually map columns. */
 export async function readWorkbookPreview(vault: Vault, file: TFile, sheetName?: string, headerRowOverride?: number): Promise<WorkbookPreview> {
 	const workbook = await loadWorkbook(vault, file);
-	const { headers, rows, headerRowNumber } = extractTabularData(getSheet(workbook, sheetName), headerRowOverride);
-	return { headers, rowCount: rows.length, sampleRows: rows.slice(0, MAX_PREVIEW_ROWS), headerRowNumber };
+	const { headers, rows, headerRowNumber, startColumn } = extractTabularData(getSheet(workbook, sheetName), headerRowOverride);
+	return { headers, rowCount: rows.length, sampleRows: rows.slice(0, MAX_PREVIEW_ROWS), headerRowNumber, startColumn };
 }
 
-/** Reads every data row (excluding the header) of the given sheet, as arrays aligned to the headers returned by `readWorkbookPreview` for the same file/sheet. */
+/** Reads every data row (excluding the header) of the given sheet, as arrays aligned to the headers returned by `readWorkbookPreview` for the same file/sheet (same `startColumn` offset applies). */
 export async function readWorkbookRows(vault: Vault, file: TFile, sheetName?: string, headerRowOverride?: number): Promise<string[][]> {
 	const workbook = await loadWorkbook(vault, file);
 	return extractTabularData(getSheet(workbook, sheetName), headerRowOverride).rows;

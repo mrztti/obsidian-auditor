@@ -8,8 +8,8 @@ import {
 	statusSlug,
 	type ControlRecord,
 } from './controlNote';
-import { ExcelLinkModal } from './excelLinkModal';
-import { isExcelLinkConfigured, syncFromExcel, syncToExcel } from './excelLink';
+import { ExcelLinkModal, confirmExcelOverwrite } from './excelLinkModal';
+import { isExcelLinkConfigured, previewSyncFromExcel, syncFromExcel, syncToExcel } from './excelLink';
 import { EvidenceGoalsModal } from './evidenceGoalsModal';
 import { ExportControlsModal } from './exportControlsModal';
 import { RapidFireExportModal } from './rapidFire/exportModal';
@@ -413,6 +413,9 @@ export class ControlsView extends ItemView {
 				}
 				syncFromExcelBtn.disabled = true;
 				try {
+					const { toOverwrite, toCreate } = await previewSyncFromExcel(this.plugin);
+					const proceed = await confirmExcelOverwrite(this.app, toOverwrite, toCreate);
+					if (!proceed) return;
 					const result = await syncFromExcel(this.plugin);
 					new Notice(`Auditor: synced from Excel — ${result.updated} updated, ${result.created} created${result.failed.length > 0 ? `, ${result.failed.length} failed` : ''}.`);
 					await load();
@@ -433,15 +436,7 @@ export class ControlsView extends ItemView {
 				syncToExcelBtn.disabled = true;
 				try {
 					const result = await syncToExcel(this.plugin);
-					const samplesText = result.conclusionSamples
-						.map((s) => `${s.controlNumber}/${s.field} → ${s.targetAddress}: len=${s.rawLength}, richText=${s.wroteRichText}, "${s.rawPreview}"`)
-						.join(' | ');
-					new Notice(
-						`Auditor: synced to Excel — ${result.updated} row(s) updated${result.notInSheet > 0 ? `, ${result.notInSheet} control(s) not found in the sheet (skipped)` : ''}.` +
-						(samplesText ? ` Conclusion samples: ${samplesText}` : ' No conclusion fields were mapped/written.') +
-						` Mapping: ${result.mappingDiagnostic.join(', ')}`,
-						0,
-					);
+					new Notice(`Auditor: synced to Excel — ${result.updated} row(s) updated${result.notInSheet > 0 ? `, ${result.notInSheet} control(s) not found in the sheet (skipped)` : ''}.`);
 				} catch (e) {
 					new Notice(`Auditor: sync to Excel failed — ${String(e)}`);
 				} finally {

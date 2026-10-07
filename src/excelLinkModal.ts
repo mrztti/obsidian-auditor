@@ -6,10 +6,32 @@ import { EMPTY_EXCEL_LINK } from './settings';
 
 type Stage = 'setup' | 'mapping';
 
+/** Converts a 1-based column number to its spreadsheet letter(s) (1→A, 26→Z, 27→AA, …) — purely for display in the mapping dropdowns/preview table. */
+function columnNumberToLetter(n: number): string {
+	let result = '';
+	let num = n;
+	while (num > 0) {
+		const rem = (num - 1) % 26;
+		result = String.fromCharCode(65 + rem) + result;
+		num = Math.floor((num - 1) / 26);
+	}
+	return result || '?';
+}
+
+/** Collapses a header's internal whitespace (including embedded line breaks from a wrapped header cell) into single spaces, purely for a clean one-line dropdown label — the stored mapping never depends on this text matching anything. */
+function cleanHeaderLabel(header: string): string {
+	const collapsed = header.replace(/\s+/g, ' ').trim();
+	return collapsed || '(blank)';
+}
+
 /**
  * Configures the single persisted bidirectional Excel link (FR: "define a bidirectional link to a
- * given excel file"): which vault file/sheet it points at, which header row it is, which column is
- * the control-number lookup key, and which header maps to which control field. Saved straight into
+ * given excel file"): which vault file/sheet it points at, which header row it is, which COLUMN
+ * NUMBER is the control-number lookup key, and which column number maps to which control field.
+ * Columns are matched/saved by position, not by header text — header text is read here only to
+ * label the dropdowns for picking, since matching by header text turned out to be unreliable (a
+ * header cell wrapped across two lines persists with an embedded line break that never matches
+ * live again; duplicate header text is also not uncommon). Saved straight into
  * `plugin.settings.excelLink` — the two sync directions (`syncFromExcel`/`syncToExcel` in
  * `excelLink.ts`) read this config fresh on every run rather than caching anything here.
  */
@@ -21,11 +43,13 @@ export class ExcelLinkModal extends Modal {
 	private sheetNames: string[] = [];
 	private selectedSheet = '';
 	private headerRowNumber = 0;
+	/** 1-based column number `headers[0]`/row arrays' index 0 corresponds to — a defined Excel Table can anchor anywhere on the sheet. */
+	private startColumn = 1;
 	private headers: string[] = [];
 	private sampleRows: string[][] = [];
-	private keyColumn = '';
-	private gateColumn = '';
-	private mapping: Partial<Record<ControlFieldKey, string>> = {};
+	private keyColumn = 0;
+	private gateColumn = 0;
+	private mapping: Partial<Record<ControlFieldKey, number>> = {};
 
 	constructor(app: App, plugin: AuditorPlugin, onSaved: () => void) {
 		super(app);
@@ -67,6 +91,7 @@ export class ExcelLinkModal extends Modal {
 			const preview = await readWorkbookPreview(this.app.vault, this.selectedFile, this.selectedSheet, this.headerRowNumber || undefined);
 			this.headers = preview.headers;
 			this.headerRowNumber = preview.headerRowNumber;
+			this.startColumn = preview.startColumn;
 			this.sampleRows = preview.sampleRows;
 			this.stage = 'mapping';
 			this.render();
@@ -155,13 +180,9 @@ export class ExcelLinkModal extends Modal {
 					const preview = await readWorkbookPreview(this.app.vault, this.selectedFile, this.selectedSheet);
 					this.headers = preview.headers;
 					this.headerRowNumber = preview.headerRowNumber;
+					this.startColumn = preview.startColumn;
 					this.sampleRows = preview.sampleRows;
-					if (!this.headers.includes(this.keyColumn)) this.keyColumn = '';
-					if (this.gateColumn && !this.headers.includes(this.gateColumn)) this.gateColumn = '';
-					for (const key of CONTROL_FIELD_KEYS) {
-						const header = this.mapping[key];
-						if (header && !this.headers.includes(header)) delete this.mapping[key];
-					}
+					this.pruneOutOfRangeSelections();
 					statusEl.setText('');
 					this.stage = 'mapping';
 					this.render();
@@ -173,10 +194,32 @@ export class ExcelLinkModal extends Modal {
 		});
 	}
 
+	/** Clears any saved key/gate/field column that no longer falls within the freshly-read header range — e.g. after reloading against a sheet with fewer columns than when this link was last configured. */
+	private pruneOutOfRangeSelections(): void {
+		const inRange = (col: number) => col >= this.startColumn && col < this.startColumn + this.headers.length;
+		if (this.keyColumn && !inRange(this.keyColumn)) this.keyColumn = 0;
+		if (this.gateColumn && !inRange(this.gateColumn)) this.gateColumn = 0;
+		for (const key of CONTROL_FIELD_KEYS) {
+			const col = this.mapping[key];
+			if (col && !inRange(col)) delete this.mapping[key];
+		}
+	}
+
 	// ─── Stage 2: key column + per-field mapping ───────────────────────────
 
+	/** Populates a `<select>` with one option per read column — value is the absolute column number (as a string), label is "A — Header text". */
+	private populateColumnSelect(select: HTMLSelectElement, selected: number, includeNone: boolean, noneLabel = '(None)'): void {
+		select.empty();
+		if (includeNone) select.createEl('option', { text: noneLabel, value: '' });
+		for (let i = 0; i < this.headers.length; i++) {
+			const col = this.startColumn + i;
+			const opt = select.createEl('option', { text: `${columnNumberToLetter(col)} — ${cleanHeaderLabel(this.headers[i] ?? '')}`, value: String(col) });
+			if (selected === col) opt.selected = true;
+		}
+	}
+
 	private renderMapping(container: HTMLElement): void {
-		container.createEl('p', { text: `Assign a column from "${this.selectedSheet}" to each field you want synced; leave the rest unmapped.` });
+		container.createEl('p', { text: `Assign a column from "${this.selectedSheet}" to each field you want synced; leave the rest unmapped. Columns are saved by position, not by header text.` });
 
 		const headerRowWrap = container.createDiv('auditor-field auditor-field-compact');
 		headerRowWrap.createEl('label', { text: 'Header row', cls: 'auditor-field-label' });
@@ -195,7 +238,9 @@ export class ExcelLinkModal extends Modal {
 					const preview = await readWorkbookPreview(this.app.vault, this.selectedFile, this.selectedSheet, override);
 					this.headers = preview.headers;
 					this.headerRowNumber = preview.headerRowNumber;
+					this.startColumn = preview.startColumn;
 					this.sampleRows = preview.sampleRows;
+					this.pruneOutOfRangeSelections();
 					reloadStatusEl.setText('');
 					this.render();
 				} catch (e) {
@@ -213,7 +258,9 @@ export class ExcelLinkModal extends Modal {
 			const tableWrap = container.createDiv('auditor-import-preview-wrap');
 			const table = tableWrap.createEl('table', { cls: 'auditor-import-preview-table' });
 			const headRow = table.createEl('thead').createEl('tr');
-			for (const header of this.headers) headRow.createEl('th', { text: header });
+			for (let i = 0; i < this.headers.length; i++) {
+				headRow.createEl('th', { text: `${columnNumberToLetter(this.startColumn + i)}: ${cleanHeaderLabel(this.headers[i] ?? '')}` });
+			}
 			const tbody = table.createEl('tbody');
 			for (const row of this.sampleRows) {
 				const tr = tbody.createEl('tr');
@@ -229,12 +276,8 @@ export class ExcelLinkModal extends Modal {
 		const keyWrap = container.createDiv('auditor-field');
 		keyWrap.createEl('label', { text: 'Control-number column (lookup key)', cls: 'auditor-field-label' });
 		const keySelect = keyWrap.createEl('select');
-		keySelect.createEl('option', { text: '— choose a column —', value: '' });
-		for (const header of this.headers) {
-			const opt = keySelect.createEl('option', { text: header, value: header });
-			if (this.keyColumn === header) opt.selected = true;
-		}
-		keySelect.addEventListener('change', () => { this.keyColumn = keySelect.value; });
+		this.populateColumnSelect(keySelect, this.keyColumn, true, '— choose a column —');
+		keySelect.addEventListener('change', () => { this.keyColumn = keySelect.value ? Number(keySelect.value) : 0; });
 		keyWrap.createEl('p', {
 			text: 'Both sync directions match a sheet row to a vault control purely by this column\'s value.',
 			cls: 'auditor-field-description',
@@ -243,12 +286,8 @@ export class ExcelLinkModal extends Modal {
 		const gateWrap = container.createDiv('auditor-field');
 		gateWrap.createEl('label', { text: 'Import gate column', cls: 'auditor-field-label' });
 		const gateSelect = gateWrap.createEl('select');
-		gateSelect.createEl('option', { text: '(None)', value: '' });
-		for (const header of this.headers) {
-			const opt = gateSelect.createEl('option', { text: header, value: header });
-			if (this.gateColumn === header) opt.selected = true;
-		}
-		gateSelect.addEventListener('change', () => { this.gateColumn = gateSelect.value; });
+		this.populateColumnSelect(gateSelect, this.gateColumn, true);
+		gateSelect.addEventListener('change', () => { this.gateColumn = gateSelect.value ? Number(gateSelect.value) : 0; });
 		gateWrap.createEl('p', {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case -- quoted literal button labels, "Excel" is a literal product name
 			text: 'Optional. If set, "Sync from Excel" only syncs a row when this column has a non-empty value — leave unset to sync every row. Does not affect "Sync to Excel".',
@@ -260,13 +299,9 @@ export class ExcelLinkModal extends Modal {
 			const wrap = grid.createDiv('auditor-field auditor-field-compact');
 			wrap.createEl('label', { text: CONTROL_FIELD_LABELS[key], cls: 'auditor-field-label' });
 			const select = wrap.createEl('select');
-			select.createEl('option', { text: '(None)', value: '' });
-			for (const header of this.headers) {
-				const opt = select.createEl('option', { text: header, value: header });
-				if (this.mapping[key] === header) opt.selected = true;
-			}
+			this.populateColumnSelect(select, this.mapping[key] ?? 0, true);
 			select.addEventListener('change', () => {
-				if (select.value) this.mapping[key] = select.value;
+				if (select.value) this.mapping[key] = Number(select.value);
 				else delete this.mapping[key];
 			});
 		}
@@ -308,4 +343,50 @@ export class ExcelLinkModal extends Modal {
 			})();
 		});
 	}
+}
+
+/** Confirms a bulk overwrite before "Sync from Excel" runs — listing exactly which existing control notes would be overwritten, never just a bare count, so the decision is informed. Used by the Controls view's "Sync from Excel" button. */
+class ConfirmExcelOverwriteModal extends Modal {
+	private onDecide: (proceed: boolean) => void;
+	private decided = false;
+	private toOverwrite: string[];
+	private toCreate: number;
+
+	constructor(app: App, toOverwrite: string[], toCreate: number, onDecide: (proceed: boolean) => void) {
+		super(app);
+		this.toOverwrite = toOverwrite;
+		this.toCreate = toCreate;
+		this.onDecide = onDecide;
+		this.setTitle('Overwrite existing controls?');
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.createEl('p', {
+			text: `Syncing from Excel will OVERWRITE ${this.toOverwrite.length} existing control note(s) with whatever is currently in the sheet` +
+				(this.toCreate > 0 ? `, and create ${this.toCreate} new one(s).` : '.'),
+		});
+		const listWrap = contentEl.createDiv('auditor-import-preview-wrap');
+		const list = listWrap.createEl('ul', { cls: 'auditor-import-overwrite-list' });
+		for (const number of this.toOverwrite) list.createEl('li', { text: number });
+
+		const actions = contentEl.createDiv('auditor-research-actions');
+		const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => { this.decided = true; this.onDecide(false); this.close(); });
+		const confirmBtn = actions.createEl('button', { text: 'Overwrite and sync', cls: 'mod-warning' });
+		confirmBtn.addEventListener('click', () => { this.decided = true; this.onDecide(true); this.close(); });
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+		if (!this.decided) this.onDecide(false);
+	}
+}
+
+/** Resolves to true if there's nothing to overwrite (no confirmation needed) or the user confirmed the overwrite; false if they cancelled. */
+export function confirmExcelOverwrite(app: App, toOverwrite: string[], toCreate: number): Promise<boolean> {
+	if (toOverwrite.length === 0) return Promise.resolve(true);
+	return new Promise((resolve) => {
+		new ConfirmExcelOverwriteModal(app, toOverwrite, toCreate, resolve).open();
+	});
 }
