@@ -152,7 +152,16 @@ export class AuditVectorStore {
 		if (this.manifest) return this.manifest;
 		if (await this.storage.pathExists('manifest.json')) {
 			const raw = await this.storage.readFile('manifest.json');
-			this.manifest = JSON.parse(raw.toString('utf8')) as Manifest;
+			try {
+				this.manifest = JSON.parse(raw.toString('utf8')) as Manifest;
+			} catch (e) {
+				// A corrupted manifest (e.g. an interrupted write, or a cloud-sync conflict on this
+				// file) must never permanently block indexing — this cache only tracks what's already
+				// indexed, so losing it just means every file gets treated as changed and re-indexed
+				// once, not any loss of the actual indexed content.
+				console.error('[Auditor] manifest.json was corrupted, resetting it — every file will be re-indexed once', e);
+				this.manifest = {};
+			}
 		} else {
 			this.manifest = {};
 		}
@@ -167,7 +176,12 @@ export class AuditVectorStore {
 		if (this.errors) return this.errors;
 		if (await this.storage.pathExists('errors.json')) {
 			const raw = await this.storage.readFile('errors.json');
-			this.errors = JSON.parse(raw.toString('utf8')) as ErrorMap;
+			try {
+				this.errors = JSON.parse(raw.toString('utf8')) as ErrorMap;
+			} catch (e) {
+				console.error('[Auditor] errors.json was corrupted, resetting it', e);
+				this.errors = {};
+			}
 		} else {
 			this.errors = {};
 		}
