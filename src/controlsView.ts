@@ -71,12 +71,14 @@ interface ControlFilters {
 	statuses: Set<string>;
 	minRating: '' | 'C' | 'C*' | 'NC';
 	commentsOnly: boolean;
+	/** True = only controls where NEITHER stage has a rating yet (empty, not the explicit "N/A" (-) rating). */
+	unratedOnly: boolean;
 	/** Fuzzy-matched against each control's `control` text (see `prepareFuzzySearch`) — applied and sorted by match score separately from the discrete filters below. */
 	searchQuery: string;
 }
 
 function emptyFilters(): ControlFilters {
-	return { sessions: new Set(), standards: new Set(), topics: new Set(), statuses: new Set(), minRating: '', commentsOnly: false, searchQuery: '' };
+	return { sessions: new Set(), standards: new Set(), topics: new Set(), statuses: new Set(), minRating: '', commentsOnly: false, unratedOnly: false, searchQuery: '' };
 }
 
 /** Human-readable summary of the active filters — shown in the Rapid Fire export confirmation (FR-8.1) and stored on the resulting batch as a frozen label, never re-evaluated against live filter state. */
@@ -88,6 +90,7 @@ function describeFilters(filters: ControlFilters): string {
 	if (filters.statuses.size > 0) parts.push(`status: ${[...filters.statuses].join(', ')}`);
 	if (filters.minRating) parts.push(`rating ≥ ${filters.minRating}`);
 	if (filters.commentsOnly) parts.push('has comments');
+	if (filters.unratedOnly) parts.push('unrated');
 	if (filters.searchQuery.trim()) parts.push(`search: "${filters.searchQuery.trim()}"`);
 	return parts.join('; ');
 }
@@ -99,6 +102,7 @@ function matchesFilters(record: ControlRecord, filters: ControlFilters): boolean
 	if (filters.statuses.size > 0 && !filters.statuses.has(record.status)) return false;
 	if (filters.minRating && maxSeverity(record) < (RATING_SEVERITY[filters.minRating] ?? 0)) return false;
 	if (filters.commentsOnly && record.comments.length === 0) return false;
+	if (filters.unratedOnly && (record.todRating !== '' || record.toeRating !== '')) return false;
 	return true;
 }
 
@@ -286,6 +290,9 @@ export class ControlsView extends ItemView {
 		const commentsOnlyLabel = filtersRow.createEl('label', { cls: 'auditor-checkbox-label' });
 		const commentsOnlyCheckbox = commentsOnlyLabel.createEl('input', { type: 'checkbox' });
 		commentsOnlyLabel.createSpan({ text: 'Has comments' });
+		const unratedOnlyLabel = filtersRow.createEl('label', { cls: 'auditor-checkbox-label' });
+		const unratedOnlyCheckbox = unratedOnlyLabel.createEl('input', { type: 'checkbox' });
+		unratedOnlyLabel.createSpan({ text: 'Unrated only' });
 		const clearBtn = filtersRow.createEl('button', { text: 'Clear filters' });
 		const exportBtn = filtersRow.createEl('button', { text: 'Export…' });
 		// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Rapid Fire" is the feature's own name
@@ -369,6 +376,7 @@ export class ControlsView extends ItemView {
 
 		minRatingSelect.addEventListener('change', () => { filters.minRating = minRatingSelect.value as ControlFilters['minRating']; refreshAllFilterOptions(); applyFilter(); });
 		commentsOnlyCheckbox.addEventListener('change', () => { filters.commentsOnly = commentsOnlyCheckbox.checked; refreshAllFilterOptions(); applyFilter(); });
+		unratedOnlyCheckbox.addEventListener('change', () => { filters.unratedOnly = unratedOnlyCheckbox.checked; refreshAllFilterOptions(); applyFilter(); });
 		clearBtn.addEventListener('click', () => {
 			filters.sessions.clear();
 			filters.standards.clear();
@@ -376,6 +384,7 @@ export class ControlsView extends ItemView {
 			filters.statuses.clear();
 			filters.minRating = '';
 			filters.commentsOnly = false;
+			filters.unratedOnly = false;
 			sessionFilter.refreshLabel();
 			standardFilter.refreshLabel();
 			topicFilter.refreshLabel();
@@ -383,6 +392,7 @@ export class ControlsView extends ItemView {
 			refreshAllFilterOptions();
 			minRatingSelect.value = '';
 			commentsOnlyCheckbox.checked = false;
+			unratedOnlyCheckbox.checked = false;
 			filters.searchQuery = '';
 			searchInput.value = '';
 			applyFilter();
