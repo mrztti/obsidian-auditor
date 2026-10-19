@@ -46,8 +46,8 @@ const SUGGESTIONS = [
 	'Find the evidence and standard clauses behind the access review control',
 ];
 
-/** One agent run as shown in the chat: live plan, activity log, proposal reviews and the final answer. */
-class RunView {
+/** One agent run as shown in the chat: live plan, activity log, proposal reviews and the final answer. Exported so other agent-backed panels (e.g. the swarm coordinator's) can reuse the same rendering instead of duplicating it. */
+export class RunView {
 	readonly root: HTMLElement;
 	private statusEl: HTMLElement;
 	private stopBtn: HTMLButtonElement;

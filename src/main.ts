@@ -1,8 +1,10 @@
+import { promises as fs } from 'fs';
 import { FileSystemAdapter, Notice, Plugin, TFile, normalizePath } from 'obsidian';
 import {
 	AuditorSettings,
 	DEFAULT_SETTINGS,
 	AuditorSettingTab,
+	type AgentMemoryItem,
 } from './settings';
 import { AuditVectorStore, type IndexSummary } from './vectorStore';
 import { EvidenceGoalIndex } from './evidenceGoalIndex';
@@ -16,6 +18,11 @@ import { AgentChatView, AGENT_CHAT_VIEW_TYPE } from './agent/chatView';
 import { DraftQueue } from './agent/draftQueue';
 import { ResearchCache } from './agent/researchCache';
 import { AgentMemoryStore } from './agent/memory';
+import { AgentBus } from './swarm/bus';
+import { SwarmOrchestrator } from './swarm/orchestrator';
+import { SwarmOutboxView, SWARM_OUTBOX_VIEW_TYPE } from './swarm/outboxView';
+import { SwarmGraphView, SWARM_GRAPH_VIEW_TYPE } from './swarm/graphView';
+import { CoordinatorView, COORDINATOR_VIEW_TYPE } from './swarm/coordinatorView';
 import { RapidFireStore } from './rapidFire/store';
 import { RapidFireView, RAPID_FIRE_VIEW_TYPE } from './rapidFire/view';
 import { SessionPlanPickerModal } from './sessionPlanPickerModal';
@@ -64,13 +71,22 @@ export default class AuditorPlugin extends Plugin {
 	researchCache!: ResearchCache;
 	/** Durable agent facts that survive across chat sessions — see `AgentMemoryStore` (FR-6.3). */
 	agentMemory!: AgentMemoryStore;
+	/** The control-writing agent swarm (orchestrator + reader/writer/verifier agents) — see `src/swarm/`. */
+	swarm!: SwarmOrchestrator;
+
+	/** Shorthand for `this.swarm.bus` — the message bus swarm-messaging tools (`request_evidence` etc.) address themselves on. */
+	get swarmBus(): AgentBus {
+		return this.swarm.bus;
+	}
 
 	async onload() {
 		log('onload: plugin loading');
 		await this.loadSettings();
+		await this.loadAgentMemoryFile();
 
 		this.researchCache = new ResearchCache(this);
 		this.agentMemory = new AgentMemoryStore(this);
+		this.swarm = new SwarmOrchestrator(this);
 
 		this.rateLimiter = new RateLimiter(
 			this.settings.maxRequestsPerSecond,
@@ -176,6 +192,18 @@ export default class AuditorPlugin extends Plugin {
 			RAPID_FIRE_VIEW_TYPE,
 			(leaf) => new RapidFireView(leaf, this),
 		);
+		this.registerView(
+			SWARM_OUTBOX_VIEW_TYPE,
+			(leaf) => new SwarmOutboxView(leaf, this),
+		);
+		this.registerView(
+			SWARM_GRAPH_VIEW_TYPE,
+			(leaf) => new SwarmGraphView(leaf, this),
+		);
+		this.registerView(
+			COORDINATOR_VIEW_TYPE,
+			(leaf) => new CoordinatorView(leaf, this),
+		);
 
 		this.addRibbonIcon('message-square', 'Open auditor chat', () => {
 			void this.activateChatView();
@@ -197,6 +225,11 @@ export default class AuditorPlugin extends Plugin {
 
 		this.addRibbonIcon('layout-list', 'Open session plan', () => {
 			new SessionPlanPickerModal(this.app, this).open();
+		});
+
+		this.addRibbonIcon('git-branch', 'Open swarm coordinator', () => {
+			void this.activateCoordinatorView();
+			void this.activateSwarmGraphView();
 		});
 
 		this.addCommand({
@@ -228,6 +261,23 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Open session plan',
 			callback: () => {
 				new SessionPlanPickerModal(this.app, this).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-swarm-coordinator',
+			name: 'Open swarm coordinator',
+			callback: () => {
+				void this.activateCoordinatorView();
+				void this.activateSwarmGraphView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-swarm-outbox',
+			name: 'Open swarm outbox',
+			callback: () => {
+				void this.activateSwarmOutboxView();
 			},
 		});
 
@@ -423,6 +473,44 @@ export default class AuditorPlugin extends Plugin {
 		const leaf = this.app.workspace.getRightLeaf(false);
 		if (!leaf) return;
 		await leaf.setViewState({ type: AGENT_CHAT_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Opens (or reveals) the swarm coordinator's chat in the right sidebar — the swarm's conversational entry point, replacing the old one-shot launch modal. */
+	async activateCoordinatorView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(COORDINATOR_VIEW_TYPE)[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: COORDINATOR_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Opens (or reveals) the swarm's live graph as a main-area tab. */
+	async activateSwarmGraphView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(SWARM_GRAPH_VIEW_TYPE)[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getLeaf('tab');
+		await leaf.setViewState({ type: SWARM_GRAPH_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	/** Opens (or reveals) the swarm outbox in the right sidebar. */
+	async activateSwarmOutboxView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(SWARM_OUTBOX_VIEW_TYPE)[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: SWARM_OUTBOX_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
 	}
 
@@ -740,5 +828,35 @@ export default class AuditorPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	/** Dedicated local file the agent swarm's/chat's durable memory (`AgentMemoryStore`) persists to, separate from `data.json` so it survives independently of the rest of settings and stays easy to inspect/back up on its own. */
+	private agentMemoryFilePath(): string {
+		return `${this.getPluginDataFolder()}/agent-memory.json`;
+	}
+
+	/**
+	 * Loads `agent-memory.json` into `settings.agentMemory`, if it exists — called once at startup,
+	 * before anything constructs an `AgentMemoryStore`. The file (once written) is the authoritative
+	 * copy; a missing or corrupted file just means memory starts empty rather than blocking startup.
+	 */
+	async loadAgentMemoryFile(): Promise<void> {
+		try {
+			const raw = await fs.readFile(this.agentMemoryFilePath(), 'utf8');
+			const items = JSON.parse(raw) as AgentMemoryItem[];
+			if (Array.isArray(items)) this.settings.agentMemory = items;
+		} catch {
+			// No file yet (first run) or it's corrupted — start with whatever loadSettings already gave us.
+		}
+	}
+
+	/** Mirrors `settings.agentMemory` to its dedicated local file — called by `AgentMemoryStore` after every write (remember/clear), so memory survives independently of a `data.json` save. */
+	async saveAgentMemoryFile(): Promise<void> {
+		try {
+			await fs.mkdir(this.getPluginDataFolder(), { recursive: true });
+			await fs.writeFile(this.agentMemoryFilePath(), JSON.stringify(this.settings.agentMemory, null, 2), 'utf8');
+		} catch (e) {
+			console.error('[Auditor] failed to persist agent-memory.json', e);
+		}
 	}
 }

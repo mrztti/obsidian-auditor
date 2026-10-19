@@ -1,14 +1,19 @@
 import type { FunctionDeclaration } from '@google/genai';
 import type AuditorPlugin from '../../main';
 import type { ControlStore } from '../controlStore';
+import type { AgentMemoryStore } from '../memory';
 import type { SessionPlanStore } from '../sessionPlanStore';
 import type { AgentHost, AgentPlan, DraftStage } from '../types';
 import type { StepUsage } from '../usage';
 
 export interface ToolContext {
 	plugin: AuditorPlugin;
+	/** Which `RoleAgent` instance is running this tool call (e.g. "writer-1", "chat") — used by swarm-messaging tools (`request_evidence`/`request_standards`) to address themselves as the sender on `plugin.swarmBus`. */
+	agentId: string;
 	controls: ControlStore;
 	sessionPlans: SessionPlanStore;
+	/** This agent's own scoped memory (`recall_memory`/`remember_fact`) — the single chat agent's is `plugin.agentMemory` (unscoped); each swarm specialist gets its own. */
+	memory: AgentMemoryStore;
 	host: AgentHost;
 	getPlan(): AgentPlan | null;
 	setPlan(plan: AgentPlan): void;

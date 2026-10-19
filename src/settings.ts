@@ -83,7 +83,8 @@ export type MemoryCategory =
 	| 'stableDocumentFact'
 	| 'acceptedDecision'
 	| 'acceptedConclusion'
-	| 'thematicEvidenceMap';
+	| 'thematicEvidenceMap'
+	| 'topicDocumentMap';
 
 /**
  * One durable fact the agent can carry across chat sessions without re-deriving or re-researching
@@ -109,6 +110,14 @@ export interface AgentMemoryItem {
 	supersededBy?: string;
 	/** ISO date after which this item should no longer be surfaced — absent means it does not expire. */
 	retentionUntil?: string;
+	/**
+	 * Which swarm agent this item belongs to — absent for the single interactive chat agent's
+	 * memory (today's behavior, unchanged) and for plugin-stamped categories that are always
+	 * shared (`acceptedDecision`/`acceptedConclusion`/`writingStyleProfileRef`). A specialist
+	 * swarm agent (an evidence/standards reader, a writer) only ever sees its own `agentId`'s items
+	 * via `AgentMemoryStore`, so e.g. two writers' `topicDocumentMap` notes don't bleed into each other.
+	 */
+	agentId?: string;
 }
 
 export interface AuditorSettings {

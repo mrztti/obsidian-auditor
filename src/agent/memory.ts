@@ -5,26 +5,38 @@ let counter = 0;
 const newId = (): string => `mem-${Date.now().toString(36)}-${(counter++).toString(36)}`;
 
 /** Categories the agent itself may write via `remember_fact` — never `acceptedConclusion`/`acceptedDecision` (those are stamped only by the plugin, right after the user's own approval) or `writingStyleProfileRef` (that's a pointer the plugin keeps in sync with settings, not something to re-derive). */
-export const AGENT_WRITABLE_CATEGORIES: MemoryCategory[] = ['engagementConfig', 'controlFrameworkMetadata', 'stableDocumentFact', 'thematicEvidenceMap'];
+export const AGENT_WRITABLE_CATEGORIES: MemoryCategory[] = ['engagementConfig', 'controlFrameworkMetadata', 'stableDocumentFact', 'thematicEvidenceMap', 'topicDocumentMap'];
 
 /**
- * Durable, structured memory the agent can carry across chat sessions (FR-6.3) — backed by
- * `plugin.settings.agentMemory` and persisted the same way every other setting is (`saveData`).
- * Items are never deleted on supersede, only marked `supersededBy`, so the store doubles as its own
- * audit log; `query()` only ever returns live (non-superseded, non-expired) items.
+ * Durable, structured memory the agent can carry across chat sessions (FR-6.3) — backed in memory by
+ * `plugin.settings.agentMemory`, and mirrored to its own local file (`agent-memory.json` in the
+ * plugin's data folder — see `AuditorPlugin.saveAgentMemoryFile`/`loadAgentMemoryFile`) on every
+ * write, so it persists across sessions independently of `data.json`. Items are never deleted on
+ * supersede, only marked `supersededBy`, so the store doubles as its own audit log; `query()` only
+ * ever returns live (non-superseded, non-expired) items.
+ *
+ * `agentId`, when given, scopes every read/write to that agent's own items only — used by the
+ * swarm's specialist agents so e.g. one writer's remembered facts never leak into another's. The
+ * single interactive chat agent omits it (unchanged from before this field existed), reading/writing
+ * only items with no `agentId` of their own.
  */
 export class AgentMemoryStore {
-	constructor(private plugin: AuditorPlugin) {}
+	constructor(private plugin: AuditorPlugin, private agentId?: string) {}
 
 	private get items(): AgentMemoryItem[] {
 		return this.plugin.settings.agentMemory;
 	}
 
-	/** Live items (not superseded, not past `retentionUntil`), optionally filtered by category and/or a case-insensitive substring of `content`/`provenance`. */
+	private ownedByMe(m: AgentMemoryItem): boolean {
+		return (m.agentId ?? undefined) === this.agentId;
+	}
+
+	/** Live items (not superseded, not past `retentionUntil`, owned by this store's agent scope), optionally filtered by category and/or a case-insensitive substring of `content`/`provenance`. */
 	query(opts: { category?: MemoryCategory; text?: string } = {}): AgentMemoryItem[] {
 		const today = new Date().toISOString().slice(0, 10);
 		const needle = opts.text?.toLowerCase().trim();
 		return this.items.filter((m) => {
+			if (!this.ownedByMe(m)) return false;
 			if (m.supersededBy) return false;
 			if (m.retentionUntil && m.retentionUntil < today) return false;
 			if (opts.category && m.category !== opts.category) return false;
@@ -33,9 +45,9 @@ export class AgentMemoryStore {
 		});
 	}
 
-	/** Every item, live or superseded — the audit view (settings tab, or a future dedicated one). */
+	/** Every item in this store's scope, live or superseded — the audit view (settings tab, or a future dedicated one). */
 	all(): AgentMemoryItem[] {
-		return [...this.items];
+		return this.items.filter((m) => this.ownedByMe(m));
 	}
 
 	/**
@@ -58,9 +70,10 @@ export class AgentMemoryStore {
 			version: 1,
 			createdAt: new Date().toISOString(),
 			retentionUntil: opts.retentionUntil,
+			agentId: this.agentId,
 		};
 		if (opts.supersedes) {
-			const prior = this.items.find((m) => m.id === opts.supersedes && !m.supersededBy);
+			const prior = this.items.find((m) => m.id === opts.supersedes && !m.supersededBy && this.ownedByMe(m));
 			if (prior) {
 				prior.supersededBy = item.id;
 				item.version = prior.version + 1;
@@ -69,6 +82,7 @@ export class AgentMemoryStore {
 		this.items.push(item);
 		this.evictIfNeeded();
 		await this.plugin.saveSettings();
+		await this.plugin.saveAgentMemoryFile();
 		return item;
 	}
 
@@ -88,8 +102,10 @@ export class AgentMemoryStore {
 		this.plugin.settings.agentMemory = this.items.filter((m) => !evictIds.has(m.id));
 	}
 
+	/** Clears only this store's own scope — a per-agent store never touches another agent's (or the shared chat's) items. */
 	async clear(): Promise<void> {
-		this.plugin.settings.agentMemory = [];
+		this.plugin.settings.agentMemory = this.items.filter((m) => !this.ownedByMe(m));
 		await this.plugin.saveSettings();
+		await this.plugin.saveAgentMemoryFile();
 	}
 }

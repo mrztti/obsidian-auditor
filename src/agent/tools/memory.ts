@@ -37,7 +37,7 @@ export const rememberFactTool: AgentTool = {
 		if (!content) return { ok: false, output: { error: 'content is required.' }, summary: 'Empty fact' };
 		if (!provenance) return { ok: false, output: { error: 'provenance is required — cite the file/control/tool this fact came from.' }, summary: 'Missing provenance' };
 
-		const item = await ctx.plugin.agentMemory.remember(category, content, provenance, { supersedes: str(args.supersedes) || undefined });
+		const item = await ctx.memory.remember(category, content, provenance, { supersedes: str(args.supersedes) || undefined });
 		return {
 			output: { id: item.id, category: item.category, version: item.version },
 			summary: `Remembered (${category}): ${content.slice(0, 80)}`,
@@ -61,7 +61,7 @@ export const recallMemoryTool: AgentTool = {
 	label: (a) => `Recalling memory${str(a.text) ? `: ${str(a.text)}` : ''}`,
 	run: (args, ctx) => {
 		const category = str(args.category) as MemoryCategory | '';
-		const items = ctx.plugin.agentMemory.query({ category: category || undefined, text: str(args.text) || undefined });
+		const items = ctx.memory.query({ category: category || undefined, text: str(args.text) || undefined });
 		return Promise.resolve({
 			output: {
 				count: items.length,
