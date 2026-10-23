@@ -1,5 +1,5 @@
 /** Every distinct agent *type* in the swarm (writers share one type/color regardless of pool index) — used to keep one consistent color per role everywhere an agent's name is shown. */
-export type AgentType = 'coordinator' | 'writer' | 'evidence-reader' | 'standards-reader' | 'controls-reader' | 'verifier';
+export type AgentType = 'coordinator' | 'writer' | 'evidence-reader' | 'standards-reader' | 'controls-reader' | 'verifier' | 'submitter';
 
 /** Maps a concrete `agentId` (e.g. "writer-2") to its type/color key — all writers share "writer" since the pool is one role played by several instances. */
 export function agentTypeOf(agentId: string): AgentType {
@@ -8,6 +8,7 @@ export function agentTypeOf(agentId: string): AgentType {
 	if (agentId === 'evidence-reader') return 'evidence-reader';
 	if (agentId === 'standards-reader') return 'standards-reader';
 	if (agentId === 'controls-reader') return 'controls-reader';
+	if (agentId === 'submitter') return 'submitter';
 	return 'verifier';
 }
 
@@ -18,6 +19,7 @@ const READABLE_LABEL: Record<AgentType, string> = {
 	'standards-reader': 'Standards reader',
 	'controls-reader': 'Controls reader',
 	verifier: 'Verifier',
+	submitter: 'Submitter',
 };
 
 /**

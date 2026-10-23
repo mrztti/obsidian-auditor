@@ -11,6 +11,7 @@ import { buildWriterPrompt } from './prompts';
 import { ReaderAgent } from './readerAgent';
 import { RoleAgent } from './roleAgent';
 import { WRITER_TOOLS } from './roles';
+import { SubmitterAgent, SUBMITTER_AGENT_ID } from './submitterAgent';
 import { EVIDENCE_READER_ID, STANDARDS_READER_ID } from './tools';
 import { TaskQueue } from './taskQueue';
 import { VerifierAgent, VERIFIER_AGENT_ID } from './verifierAgent';
@@ -25,7 +26,7 @@ export type SwarmStatus = 'idle' | 'running';
 
 type Listener = () => void;
 
-/** Agent ids whose Burn Mode defaults to ON — the verifier and the coordinator's final QA pass are meant to use the more capable model by default; everything else defaults off (same as the main chat). */
+/** Agent ids whose Burn Mode defaults to ON — the verifier and the coordinator's own QA pass are meant to use the more capable model by default. The submitter deliberately defaults OFF: it's a strict, mechanical rule check, not a step that benefits from the boosted model, and the user has asked for it to stay on the base model unless explicitly switched on. Everything else defaults off too (same as the main chat). */
 const BURN_DEFAULT_ON = new Set<string>([COORDINATOR_ID, VERIFIER_AGENT_ID]);
 
 /**
@@ -34,7 +35,8 @@ const BURN_DEFAULT_ON = new Set<string>([COORDINATOR_ID, VERIFIER_AGENT_ID]);
  * writer pool, and lets each writer's own `RoleAgent` loop (evidence/standards/similar-controls all
  * reached via the bus — see `roles.ts`/`prompts.ts`) do the actual drafting work. A writer never
  * proposes anything itself: it submits its finished, verified draft to `CoordinatorReviewer`, which
- * runs one more authoritative QA pass and has the final say on what reaches the shared `OutboxStore`.
+ * runs one more authoritative QA pass, routes it through `SubmitterAgent`'s strict final check, and
+ * only then has the final say on what reaches the shared `OutboxStore`.
  */
 export class SwarmOrchestrator {
 	readonly bus = new AgentBus();
@@ -43,6 +45,7 @@ export class SwarmOrchestrator {
 	readonly standardsReader: ReaderAgent;
 	readonly controlsReader: ControlsReaderAgent;
 	readonly verifier: VerifierAgent;
+	readonly submitter: SubmitterAgent;
 	readonly coordinatorReviewer: CoordinatorReviewer;
 	private writers: WriterHandle[] = [];
 	private status: SwarmStatus = 'idle';
@@ -55,6 +58,7 @@ export class SwarmOrchestrator {
 		this.standardsReader = new ReaderAgent(plugin, STANDARDS_READER_ID, ['standards'], this.bus);
 		this.controlsReader = new ControlsReaderAgent(plugin, this.bus);
 		this.verifier = new VerifierAgent(plugin, this.bus, () => this.burnModeFor(this.verifier.agentId));
+		this.submitter = new SubmitterAgent(plugin, this.bus, () => this.burnModeFor(SUBMITTER_AGENT_ID));
 		this.coordinatorReviewer = new CoordinatorReviewer(
 			plugin, this.bus, this.outbox,
 			() => this.burnModeFor(COORDINATOR_ID),
@@ -88,6 +92,7 @@ export class SwarmOrchestrator {
 			{ agentId: this.standardsReader.agentId, tasks: this.standardsReader.tasks, getSummary: () => this.standardsReader.getSummary() },
 			{ agentId: this.controlsReader.agentId, tasks: this.controlsReader.tasks, getSummary: () => this.controlsReader.getSummary() },
 			{ agentId: this.verifier.agentId, tasks: this.verifier.tasks, getSummary: () => this.verifier.getSummary() },
+			{ agentId: this.submitter.agentId, tasks: this.submitter.tasks, getSummary: () => this.submitter.getSummary() },
 			{ agentId: COORDINATOR_ID, tasks: this.coordinatorReviewer.tasks, getSummary: () => this.coordinatorReviewer.getSummary() },
 		];
 	}
@@ -146,6 +151,7 @@ export class SwarmOrchestrator {
 		this.standardsReader.start();
 		this.controlsReader.start();
 		this.verifier.start();
+		this.submitter.start();
 		this.coordinatorReviewer.start();
 
 		const clampedPoolSize = Math.max(1, Math.min(poolSize, controlNumbers.length));
@@ -230,13 +236,14 @@ export class SwarmOrchestrator {
 		}
 	}
 
-	/** Stops every writer, tears down the reader/verifier/coordinator-reviewer listeners, and cancels any in-flight bus requests. Staged outbox entries are left as-is — they're independent of the run that produced them. */
+	/** Stops every writer, tears down the reader/verifier/submitter/coordinator-reviewer listeners, and cancels any in-flight bus requests. Staged outbox entries are left as-is — they're independent of the run that produced them. */
 	stop(): void {
 		for (const w of this.writers) w.agent.stop();
 		this.evidenceReader.stop();
 		this.standardsReader.stop();
 		this.controlsReader.stop();
 		this.verifier.stop();
+		this.submitter.stop();
 		this.coordinatorReviewer.stop();
 		this.bus.clear();
 		this.status = 'idle';

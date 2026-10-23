@@ -6,9 +6,10 @@ import type { TaskQueue } from './taskQueue';
 import { EVIDENCE_READER_ID, STANDARDS_READER_ID, VERIFIER_ID } from './tools';
 import { CONTROLS_READER_ID } from './controlsReaderAgent';
 import { COORDINATOR_AGENT_ID } from './coordinatorAgent';
+import { SUBMITTER_AGENT_ID } from './submitterAgent';
 
 /** Agents that actually call a generation model, and so get a Burn Mode checkbox in the graph — the readers only do vector search/embeddings, so a burn toggle on them would be a no-op. */
-const BURN_CAPABLE = new Set<string>([COORDINATOR_AGENT_ID, VERIFIER_ID]);
+const BURN_CAPABLE = new Set<string>([COORDINATOR_AGENT_ID, VERIFIER_ID, SUBMITTER_AGENT_ID]);
 const isBurnCapable = (agentId: string): boolean => BURN_CAPABLE.has(agentId) || agentId.startsWith('writer-');
 
 export const SWARM_GRAPH_VIEW_TYPE = 'auditor-swarm-graph-view';
@@ -61,6 +62,8 @@ export class SwarmGraphView extends ItemView {
 	/** The selected node's status-summary paragraph and activity-log list — kept as fields so `refreshSummary()`/`appendLogLine()` can update them in place without a full `renderDetail()` rebuild. Reset (to null) at the top of every `renderDetail()` call, which recreates them. */
 	private summaryEl: HTMLElement | null = null;
 	private logListEl: HTMLElement | null = null;
+	/** The coordinator node's control-status panel — only set while it's the selected node (see `renderDetail`/`refreshControlStatuses`). */
+	private controlStatusEl: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private plugin: AuditorPlugin) {
 		super(leaf);
@@ -126,6 +129,7 @@ export class SwarmGraphView extends ItemView {
 			{ id: STANDARDS_READER_ID, label: 'Standards reader', col: 'left', status: 'idle' },
 			{ id: CONTROLS_READER_ID, label: 'Controls reader', col: 'left', status: 'idle' },
 			{ id: VERIFIER_ID, label: 'Verifier', col: 'right', status: 'idle' },
+			{ id: SUBMITTER_AGENT_ID, label: 'Submitter', col: 'right', status: 'idle' },
 			...writers.map((w): NodeInfo => ({ id: w.agentId, label: w.agentId, col: 'center', status: w.agent.isRunning ? 'drafting' : 'idle' })),
 		];
 	}
@@ -195,6 +199,7 @@ export class SwarmGraphView extends ItemView {
 			...writers.map((w): [string, string] => [w, STANDARDS_READER_ID]),
 			...writers.map((w): [string, string] => [w, CONTROLS_READER_ID]),
 			...writers.map((w): [string, string] => [w, VERIFIER_ID]),
+			[COORDINATOR_AGENT_ID, SUBMITTER_AGENT_ID],
 		];
 		for (const [a, b] of pairs) {
 			const elA = this.nodeEls.get(a);
@@ -231,6 +236,7 @@ export class SwarmGraphView extends ItemView {
 		if (this.selected !== agentId) return;
 		this.refreshSummary();
 		this.appendLogLine(line);
+		this.refreshControlStatuses();
 	}
 
 	/** Recomputes and redraws just the selected agent's status-summary paragraph — called on every log line and task-list change, so it reads as continuously live rather than only refreshing on a full `renderDetail()` re-render (e.g. right after a task finishes). */
@@ -248,6 +254,45 @@ export class SwarmGraphView extends ItemView {
 		this.logListEl.querySelector('.auditor-field-description')?.remove();
 		const el = this.logListEl.createDiv({ text: line, cls: 'auditor-swarm-log-line' });
 		this.logListEl.prepend(el);
+	}
+
+	/** Redraws the coordinator's control-status panel in place (see `renderControlStatuses`) — a no-op while any other node is selected. */
+	private refreshControlStatuses(): void {
+		if (this.selected !== COORDINATOR_AGENT_ID || !this.controlStatusEl) return;
+		this.drawControlStatuses(this.controlStatusEl);
+	}
+
+	/**
+	 * Every (control, stage) the coordinator has ever tracked (`ControlTaskStatusEntry`), with a
+	 * Retry button for anything stuck at `needs_attention` — this is the coordinator's own view of
+	 * "ensure every task finishes": nothing it has touched just disappears, it either reaches
+	 * `staged`/`applied` or sits here, visibly, until retried.
+	 */
+	private renderControlStatuses(parent: HTMLElement): void {
+		parent.createEl('h5', { text: 'Control status' });
+		this.controlStatusEl = parent.createDiv('auditor-swarm-control-status-list');
+		this.drawControlStatuses(this.controlStatusEl);
+	}
+
+	private drawControlStatuses(container: HTMLElement): void {
+		container.empty();
+		const entries = this.plugin.swarm.coordinatorReviewer.getControlStatuses().sort((a, b) => b.updatedAt - a.updatedAt);
+		if (entries.length === 0) {
+			container.createEl('p', { text: 'Nothing tracked yet.', cls: 'auditor-field-description' });
+			return;
+		}
+		for (const entry of entries) {
+			const row = container.createDiv(`auditor-swarm-control-status is-${entry.status}`);
+			const head = row.createDiv('auditor-swarm-control-status-head');
+			head.createSpan({ text: `${entry.controlId} (${entry.stage})`, cls: 'auditor-swarm-task-label' });
+			head.createSpan({ text: entry.status.replace('_', ' '), cls: 'auditor-swarm-task-status' });
+			if (entry.attempts > 0) head.createSpan({ text: `attempt ${entry.attempts}`, cls: 'auditor-swarm-task-status' });
+			if (entry.status === 'needs_attention') {
+				const retryBtn = head.createEl('button', { text: 'Retry' });
+				retryBtn.addEventListener('click', () => { void this.plugin.swarm.coordinatorReviewer.retry(entry.controlId, entry.stage); });
+			}
+			if (entry.note) row.createDiv({ text: entry.note, cls: 'auditor-swarm-task-error' });
+		}
 	}
 
 	private addFeedItem(item: Omit<FeedItem, 'expanded'>): void {
@@ -314,6 +359,7 @@ export class SwarmGraphView extends ItemView {
 		this.detailEl.empty();
 		this.summaryEl = null;
 		this.logListEl = null;
+		this.controlStatusEl = null;
 		if (!this.selected) {
 			this.detailEl.createEl('p', { text: 'Select an agent to see its task list and activity.', cls: 'auditor-field-description' });
 			return;
@@ -346,6 +392,8 @@ export class SwarmGraphView extends ItemView {
 		} else if (specialistForSummary) {
 			this.renderTaskList(specialistForSummary.tasks);
 		}
+
+		if (this.selected === COORDINATOR_AGENT_ID) this.renderControlStatuses(this.detailEl);
 
 		this.detailEl.createEl('h5', { text: 'Recent activity' });
 		const lines = this.logs.get(this.selected) ?? [];

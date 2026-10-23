@@ -362,6 +362,54 @@ const QA_BATCH_SCHEMA: Schema = {
 	required: ['results'],
 };
 
+/** One rule violation found by `submitterFinalCheck` — both fields are mandatory per violation, never a vague "doesn't follow the rules". */
+export interface SubmitterViolation {
+	/** The exact rule text violated, copied word-for-word from the writing rules or prohibited-wording list given to the model — never paraphrased or summarized. */
+	ruleQuote: string;
+	/** The exact change required — names the precise sentence/phrase in the conclusion and its exact replacement (or states it must be deleted), never a vague instruction. */
+	requiredModification: string;
+}
+
+/** One item's result from `submitterFinalCheck` — see `submitterAgent.ts`. There is no "corrected" text here: this gate only approves or blocks. */
+export interface SubmitterCheckItemResult {
+	controlId: string;
+	stage: DraftStage;
+	approved: boolean;
+	violations: SubmitterViolation[];
+}
+
+const SUBMITTER_CHECK_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		results: {
+			type: Type.ARRAY,
+			description: 'Exactly one entry per item checked, in the same order.',
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					controlId: { type: Type.STRING, description: 'Copied exactly from the item checked.' },
+					stage: { type: Type.STRING, enum: ['stage1', 'stage2'] },
+					approved: { type: Type.BOOLEAN, description: 'True only if every rule below is met exactly, with zero violations.' },
+					violations: {
+						type: Type.ARRAY,
+						description: 'Empty array only if approved. Every entry MUST quote the exact rule text violated and state the exact modification required — never blank or vague.',
+						items: {
+							type: Type.OBJECT,
+							properties: {
+								ruleQuote: { type: Type.STRING, description: 'The exact rule text violated, copied word-for-word from the writing rules or prohibited wording given below — never paraphrased.' },
+								requiredModification: { type: Type.STRING, description: 'The exact change required: name the precise sentence/phrase in the conclusion and its exact replacement, or state it must be deleted.' },
+							},
+							required: ['ruleQuote', 'requiredModification'],
+						},
+					},
+				},
+				required: ['controlId', 'stage', 'approved', 'violations'],
+			},
+		},
+	},
+	required: ['results'],
+};
+
 // ─── Rapid Fire (Epic 8) ────────────────────────────────────────────────────
 
 export interface SimilarityBatchAssignment {
@@ -1263,6 +1311,114 @@ export class GeminiGenerate {
 
 		const { thinking, parsed, usage } = await this.generateStructured<{ results: QaBatchItemResult[] }>(prompt, QA_BATCH_SCHEMA, model ?? this.model);
 		return { thinking, results: parsed.results, usage };
+	}
+
+	/**
+	 * The swarm's final, strict compliance gate — see `submitterAgent.ts`. Unlike
+	 * `qaReviewConclusionsBatch`, this NEVER corrects anything: it only approves or blocks, and every
+	 * block must cite the exact rule text violated (word-for-word from `writingRules`/the profile's
+	 * prohibited wording) plus the exact modification required — never a vague "doesn't comply".
+	 */
+	async submitterFinalCheck(
+		items: QaBatchItemInput[],
+		writingRules: { stage1: string; stage2: string },
+		profile: WritingStyleProfile,
+		model?: string,
+	): Promise<{ thinking: string; results: SubmitterCheckItemResult[]; usage: GenerateContentResponse['usageMetadata'] }> {
+		const stagesPresent = new Set(items.map((it) => it.stage));
+		const rulesBlock = [
+			stagesPresent.has('stage1') ? `Stage 1 (Test of Design) writing rules:\n${writingRules.stage1}` : '',
+			stagesPresent.has('stage2') ? `Stage 2 (Test of Effectiveness) writing rules:\n${writingRules.stage2}` : '',
+		].filter(Boolean).join('\n\n') || '(no rules configured)';
+		const prohibitedBlock = profile.prohibitedWording.length > 0
+			? profile.prohibitedWording.join(', ')
+			: '(none configured)';
+		const itemsBlock = items
+			.map((it, i) => [
+				`[${i}] Control ${it.controlId} — ${it.stage}`,
+				'Control/requirement text:',
+				it.controlText,
+				`Rating: ${it.rating}`,
+				`Evidence references: ${it.evidenceReferences.join(', ') || '(none listed)'}`,
+				'Conclusion text:',
+				it.conclusionText,
+			].join('\n'))
+			.join('\n\n');
+
+		const prompt = [
+			`You are the FINAL, strict compliance gate for ${items.length} drafted audit conclusion(s) —`,
+			'the last check before anything can reach the user. You do NOT rewrite, correct, or soften',
+			'anything; you only decide APPROVE or BLOCK, per item, strictly against the rules below.',
+			'',
+			'For EACH item, by its [index]:',
+			'- Compare the conclusion text sentence-by-sentence against the writing rules for its stage',
+			'  and the prohibited-wording list. Treat every rule as binding, not a suggestion.',
+			'- Approve ONLY if every rule is met exactly, with zero violations. Any doubt means BLOCK.',
+			'- For EVERY violation, you MUST quote the exact rule text violated — copied WORD FOR WORD',
+			'  from the writing rules or prohibited-wording list below, never paraphrased or summarized.',
+			'- For EVERY violation, you MUST also state the EXACT modification required: name the precise',
+			'  sentence or phrase in the conclusion text and exactly what it must become (the replacement',
+			'  text verbatim, or "delete this sentence") — never a vague instruction like "improve this"',
+			'  or "needs to comply with the rules".',
+			'- An item with zero violations is approved; an item with any violation at all is blocked —',
+			'  there is no partial pass.',
+			'',
+			'Writing-style rules:',
+			rulesBlock,
+			'',
+			'Prohibited wording:',
+			prohibitedBlock,
+			'',
+			'Items to check:',
+			itemsBlock,
+		].join('\n');
+
+		const { thinking, parsed, usage } = await this.generateStructured<{ results: SubmitterCheckItemResult[] }>(prompt, SUBMITTER_CHECK_SCHEMA, model ?? this.model);
+		return { thinking, results: parsed.results, usage };
+	}
+
+	/**
+	 * The coordinator's own repair step when `submitterFinalCheck` blocks a draft: applies EXACTLY
+	 * the violations it cited (each already an exact rule quote + exact required modification —
+	 * never re-interpreted or re-researched here) and nothing else. The result goes straight back to
+	 * `submitterFinalCheck` for re-checking; this never guesses at what might be wrong beyond the
+	 * specific violations it was given.
+	 */
+	async applySubmitterFixes(
+		item: { controlId: string; stage: DraftStage; controlText: string; conclusionText: string; rating: string },
+		violations: SubmitterViolation[],
+		model?: string,
+	): Promise<{ thinking: string; conclusionText: string; rating: string; usage: GenerateContentResponse['usageMetadata'] }> {
+		const violationsBlock = violations
+			.map((v, i) => `[${i}] Violated rule (verbatim): "${v.ruleQuote}"\nRequired modification: ${v.requiredModification}`)
+			.join('\n\n');
+		const prompt = [
+			`Apply EXACTLY the following required modification(s) to this audit conclusion for control ${item.controlId} (${item.stage}). Change nothing else — do not rewrite, rephrase, or "improve" anything beyond what each modification specifies.`,
+			'',
+			'Control/requirement text (for context only):',
+			item.controlText,
+			'',
+			'Current conclusion text:',
+			item.conclusionText,
+			'',
+			`Current rating: ${item.rating}`,
+			'',
+			'Required modification(s) — apply every one, exactly as specified:',
+			violationsBlock,
+			'',
+			'Return the complete corrected conclusion text (the whole text, not a diff or just the changed part) and the rating — unchanged unless a modification explicitly requires changing it.',
+		].join('\n');
+
+		const schema: Schema = {
+			type: Type.OBJECT,
+			properties: {
+				conclusionText: { type: Type.STRING, description: 'The complete corrected conclusion text, with every listed modification applied exactly and nothing else changed.' },
+				rating: { type: Type.STRING, description: 'The rating — identical to the input unless a modification explicitly requires changing it.' },
+			},
+			required: ['conclusionText', 'rating'],
+		};
+		const { thinking, parsed, usage } = await this.generateStructured<{ conclusionText: string; rating: string }>(prompt, schema, model ?? this.model);
+		return { thinking, conclusionText: parsed.conclusionText, rating: parsed.rating, usage };
 	}
 
 	/**

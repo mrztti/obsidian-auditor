@@ -2768,6 +2768,7 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	--auditor-agent-standards-reader: #8e44ad;
 	--auditor-agent-controls-reader: #d35400;
 	--auditor-agent-verifier: #16a085;
+	--auditor-agent-submitter: #b03a8e;
 }
 
 .auditor-agent-badge {
@@ -2784,6 +2785,7 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 .auditor-agent-badge.type-standards-reader { color: var(--auditor-agent-standards-reader); background: color-mix(in srgb, var(--auditor-agent-standards-reader) 15%, transparent); }
 .auditor-agent-badge.type-controls-reader { color: var(--auditor-agent-controls-reader); background: color-mix(in srgb, var(--auditor-agent-controls-reader) 15%, transparent); }
 .auditor-agent-badge.type-verifier { color: var(--auditor-agent-verifier); background: color-mix(in srgb, var(--auditor-agent-verifier) 15%, transparent); }
+.auditor-agent-badge.type-submitter { color: var(--auditor-agent-submitter); background: color-mix(in srgb, var(--auditor-agent-submitter) 15%, transparent); }
 
 .auditor-swarm-node.type-coordinator { border-color: var(--auditor-agent-coordinator); }
 .auditor-swarm-node.type-writer { border-color: var(--auditor-agent-writer); }
@@ -2791,6 +2793,7 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 .auditor-swarm-node.type-standards-reader { border-color: var(--auditor-agent-standards-reader); }
 .auditor-swarm-node.type-controls-reader { border-color: var(--auditor-agent-controls-reader); }
 .auditor-swarm-node.type-verifier { border-color: var(--auditor-agent-verifier); }
+.auditor-swarm-node.type-submitter { border-color: var(--auditor-agent-submitter); }
 
 .auditor-swarm-edge.type-coordinator { stroke: var(--auditor-agent-coordinator); }
 .auditor-swarm-edge.type-writer { stroke: var(--auditor-agent-writer); }
@@ -2798,6 +2801,7 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 .auditor-swarm-edge.type-standards-reader { stroke: var(--auditor-agent-standards-reader); }
 .auditor-swarm-edge.type-controls-reader { stroke: var(--auditor-agent-controls-reader); }
 .auditor-swarm-edge.type-verifier { stroke: var(--auditor-agent-verifier); }
+.auditor-swarm-edge.type-submitter { stroke: var(--auditor-agent-submitter); }
 
 .auditor-swarm-node-summary {
 	font-size: 0.75em;
@@ -2814,4 +2818,34 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	color: var(--text-muted);
 	margin-top: 4px;
 	justify-content: center;
+}
+
+.auditor-swarm-control-status-list {
+	margin-bottom: 10px;
+}
+
+.auditor-swarm-control-status {
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding: 4px 0;
+	font-size: 0.8em;
+}
+
+.auditor-swarm-control-status-head {
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	flex-wrap: wrap;
+}
+
+.auditor-swarm-control-status.is-needs_attention .auditor-swarm-task-status {
+	color: var(--text-error);
+}
+
+.auditor-swarm-control-status.is-forced .auditor-swarm-task-status {
+	color: var(--color-orange);
+}
+
+.auditor-swarm-control-status-head button {
+	font-size: 0.75em;
+	padding: 1px 8px;
 }

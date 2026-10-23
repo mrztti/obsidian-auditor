@@ -12,7 +12,7 @@ import { ExcelLinkModal, confirmExcelOverwrite } from './excelLinkModal';
 import { isExcelLinkConfigured, previewSyncFromExcel, syncFromExcel, syncToExcel } from './excelLink';
 import { EvidenceGoalsModal } from './evidenceGoalsModal';
 import { ExportControlsModal } from './exportControlsModal';
-import { RapidFireExportModal } from './rapidFire/exportModal';
+import { SwarmExportModal } from './swarm/exportModal';
 import type { DraftStage } from './agent/draftQueue';
 
 export const CONTROLS_VIEW_TYPE = 'auditor-controls-view';
@@ -295,8 +295,7 @@ export class ControlsView extends ItemView {
 		unratedOnlyLabel.createSpan({ text: 'Unrated only' });
 		const clearBtn = filtersRow.createEl('button', { text: 'Clear filters' });
 		const exportBtn = filtersRow.createEl('button', { text: 'Export…' });
-		// eslint-disable-next-line obsidianmd/ui/sentence-case -- "Rapid Fire" is the feature's own name
-		const rapidFireBtn = filtersRow.createEl('button', { text: 'Export to Rapid Fire…' });
+		const swarmExportBtn = filtersRow.createEl('button', { text: 'Export to swarm…' });
 		const status = filtersRow.createDiv('auditor-controls-count');
 
 		const scrollArea = container.createDiv('auditor-controls-scroll-area');
@@ -453,8 +452,8 @@ export class ControlsView extends ItemView {
 		exportBtn.addEventListener('click', () => {
 			new ExportControlsModal(this.app, this.plugin, currentlyFiltered()).open();
 		});
-		rapidFireBtn.addEventListener('click', () => {
-			new RapidFireExportModal(this.app, this.plugin, currentlyFiltered(), describeFilters(filters)).open();
+		swarmExportBtn.addEventListener('click', () => {
+			new SwarmExportModal(this.app, this.plugin, currentlyFiltered(), describeFilters(filters)).open();
 		});
 		void load();
 	}

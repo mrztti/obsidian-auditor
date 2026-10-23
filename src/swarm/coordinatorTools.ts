@@ -1,5 +1,8 @@
 import { Type } from '@google/genai';
+import type { DraftStage } from '../agent/types';
 import { clampInt, str, type AgentTool } from '../agent/tools/types';
+
+const VALID_STAGES: DraftStage[] = ['stage1', 'stage2'];
 
 /** The coordinator's own way to launch the writer pool — replaces the old one-shot launch modal: the user describes the request in chat, the coordinator resolves it and dispatches. */
 export const dispatchSwarmTool: AgentTool = {
@@ -38,7 +41,7 @@ export const dispatchSwarmTool: AgentTool = {
 export const getSwarmStatusTool: AgentTool = {
 	declaration: {
 		name: 'get_swarm_status',
-		description: 'Reports the swarm\'s current status: overall running/idle, and each writer/reader/verifier\'s own task queue (pending/in_progress/done/failed).',
+		description: 'Reports the swarm\'s current status: overall running/idle, each writer/reader/verifier/submitter\'s own task queue (pending/in_progress/done/failed), the outbox size, and every (control, stage) the coordinator is tracking through its own fix loop — including anything "needsAttention" (the pipeline itself failed, e.g. a settings/network error — retry_control can act on these) and anything "forcedThrough" (staged despite the submitter\'s check never fully clearing it after its fix attempts — worth mentioning to the user, not an error).',
 		parameters: { type: Type.OBJECT, properties: {} },
 	},
 	label: () => 'Checking swarm status',
@@ -53,10 +56,42 @@ export const getSwarmStatusTool: AgentTool = {
 			agentId: s.agentId,
 			tasks: s.tasks.list().map((t) => ({ topic: t.payload, status: t.status, error: t.error })),
 		}));
+		const controlStatuses = swarm.coordinatorReviewer.getControlStatuses().map((e) => ({
+			controlId: e.controlId, stage: e.stage, status: e.status, attempts: e.attempts, note: e.note,
+		}));
+		const needsAttention = controlStatuses.filter((e) => e.status === 'needs_attention');
+		const forcedThrough = controlStatuses.filter((e) => e.status === 'forced');
 		return Promise.resolve({
-			output: { status: swarm.getStatus(), writers, specialists, outboxSize: swarm.outbox.size },
-			summary: `Swarm: ${swarm.getStatus()} (${writers.length} writer(s), ${swarm.outbox.size} item(s) in outbox)`,
+			output: { status: swarm.getStatus(), writers, specialists, outboxSize: swarm.outbox.size, controlStatuses, needsAttention, forcedThrough },
+			summary: `Swarm: ${swarm.getStatus()} (${writers.length} writer(s), ${swarm.outbox.size} item(s) in outbox, ${needsAttention.length} needing attention, ${forcedThrough.length} let through unresolved)`,
 		});
+	},
+};
+
+export const retryControlTool: AgentTool = {
+	declaration: {
+		name: 'retry_control',
+		description: 'Re-runs the coordinator\'s fix loop for one (control, stage) currently stuck at "needs_attention" (see get_swarm_status\'s needsAttention list) — resumes from its last known text/rating rather than starting over. Use this to make sure every tracked task actually finishes rather than leaving it stuck.',
+		parameters: {
+			type: Type.OBJECT,
+			properties: {
+				controlId: { type: Type.STRING },
+				stage: { type: Type.STRING, enum: VALID_STAGES },
+			},
+			required: ['controlId', 'stage'],
+		},
+	},
+	label: (a) => `Retrying ${str(a.controlId)} (${str(a.stage)})`,
+	run: async (args, ctx) => {
+		const controlId = str(args.controlId).trim();
+		const stage = str(args.stage) as DraftStage;
+		if (!controlId || !VALID_STAGES.includes(stage)) return { ok: false, output: { error: 'controlId and a valid stage are required.' }, summary: 'Missing/invalid fields' };
+		await ctx.plugin.swarm.coordinatorReviewer.retry(controlId, stage);
+		const entry = ctx.plugin.swarm.coordinatorReviewer.getControlStatuses().find((e) => e.controlId === controlId && e.stage === stage);
+		return {
+			output: { status: entry?.status ?? 'unknown' },
+			summary: `Retry for ${controlId} (${stage}): now ${entry?.status ?? 'unknown'}`,
+		};
 	},
 };
 
