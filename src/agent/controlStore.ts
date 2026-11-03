@@ -208,7 +208,11 @@ export class ControlStore {
 	}
 
 	/** Writes the approved changes, refusing any whose note was edited since the agent read it. Spot-indexes just the changed files (never the whole folder — the agent never renames, since `number` isn't an editable field). */
-	async apply(changes: ResolvedChange[]): Promise<ApplyOutcome[]> {
+	apply(changes: ResolvedChange[]): Promise<ApplyOutcome[]> {
+		return this.plugin.vaultWriteLock.run(() => this.applyLocked(changes));
+	}
+
+	private async applyLocked(changes: ResolvedChange[]): Promise<ApplyOutcome[]> {
 		const { vault } = this.plugin.app;
 		const outcomes: ApplyOutcome[] = [];
 		const savedFiles: TFile[] = [];

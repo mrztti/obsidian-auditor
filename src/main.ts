@@ -16,6 +16,7 @@ import { ControlsDashboardView, CONTROLS_DASHBOARD_VIEW_TYPE } from './controlsD
 import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
 import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
 import { AgentChatView, AGENT_CHAT_VIEW_TYPE } from './agent/chatView';
+import { AsyncMutex } from './asyncMutex';
 import { DraftQueue } from './agent/draftQueue';
 import { ResearchCache } from './agent/researchCache';
 import { AgentMemoryStore } from './agent/memory';
@@ -66,6 +67,10 @@ export default class AuditorPlugin extends Plugin {
 	rapidFireRateLimiter!: RateLimiter;
 	/** Drafting targets queued from the Controls view, reviewed and launched from the chat panel's queue drawer. */
 	draftQueue = new DraftQueue();
+	/** Several chat agents can run at once: their disk writes of `data.json` / `agent-memory.json` go through this so two saves never interleave. */
+	private persistLock = new AsyncMutex();
+	/** Held while an agent applies approved edits (read → compare → write), so two agents can never both pass the "note unchanged" check and then overwrite each other. */
+	readonly vaultWriteLock = new AsyncMutex();
 	/** Every Rapid Fire batch this session — see `RapidFireStore` (Epic 8). */
 	rapidFireStore = new RapidFireStore();
 	/** Caches agent research-tool results across runs/chats — see `ResearchCache` (FR-5.2). */
@@ -855,7 +860,7 @@ export default class AuditorPlugin extends Plugin {
 	}
 
 	async saveSettings() {
-		await this.saveData(this.settings);
+		await this.persistLock.run(() => this.saveData(this.settings));
 	}
 
 	/** Dedicated local file the agent swarm's/chat's durable memory (`AgentMemoryStore`) persists to, separate from `data.json` so it survives independently of the rest of settings and stays easy to inspect/back up on its own. */
@@ -880,11 +885,14 @@ export default class AuditorPlugin extends Plugin {
 
 	/** Mirrors `settings.agentMemory` to its dedicated local file — called by `AgentMemoryStore` after every write (remember/clear), so memory survives independently of a `data.json` save. */
 	async saveAgentMemoryFile(): Promise<void> {
-		try {
-			await fs.mkdir(this.getPluginDataFolder(), { recursive: true });
-			await fs.writeFile(this.agentMemoryFilePath(), JSON.stringify(this.settings.agentMemory, null, 2), 'utf8');
-		} catch (e) {
-			console.error('[Auditor] failed to persist agent-memory.json', e);
-		}
+		await this.persistLock.run(async () => {
+			try {
+				await fs.mkdir(this.getPluginDataFolder(), { recursive: true });
+				// Serialized at write time, not call time, so the file always ends up with the latest state from every agent.
+				await fs.writeFile(this.agentMemoryFilePath(), JSON.stringify(this.settings.agentMemory, null, 2), 'utf8');
+			} catch (e) {
+				console.error('[Auditor] failed to persist agent-memory.json', e);
+			}
+		});
 	}
 }

@@ -305,7 +305,11 @@ export class SessionPlanStore {
 	}
 
 	/** Writes the edited plan, refusing if the saved plan is no longer what the agent read (see `PlanSnapshot` for why this re-checks via cached `TFile`s rather than re-resolving paths or re-parsing everything). */
-	async apply(session: string, after: InterviewSessionPlan): Promise<{ ok: true } | { ok: false; error: string }> {
+	apply(session: string, after: InterviewSessionPlan): Promise<{ ok: true } | { ok: false; error: string }> {
+		return this.plugin.vaultWriteLock.run(() => this.applyLocked(session, after));
+	}
+
+	private async applyLocked(session: string, after: InterviewSessionPlan): Promise<{ ok: true } | { ok: false; error: string }> {
 		const snap = this.snapshots.get(session);
 		if (!snap) return { ok: false, error: 'Plan was never read.' };
 		try {

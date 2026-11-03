@@ -9,19 +9,21 @@ import { formatTokens as formatTokensCompact, formatUsageLine, sumUsage, type St
 
 const STAGE_LABEL: Record<DraftStage, string> = { stage1: 'Stage 1', stage2: 'Stage 2' };
 
-/** Composes the message that launches a batch of queued drafting targets — instructs the agent to work through them one at a time, in full, rather than skimming across all of them. */
-function buildQueueLaunchPrompt(items: DraftQueueItem[]): string {
+/** Composes the message that launches a batch of queued drafting targets — instructs the agent to work through them one at a time, in full, rather than skimming across all of them. `guidance` is whatever the user typed in the prompt field alongside the queue. */
+function buildQueueLaunchPrompt(items: DraftQueueItem[], guidance: string): string {
 	const lines = items.map((item, i) => {
 		const parts = [`${i + 1}. Control ${item.controlNumber} — ${STAGE_LABEL[item.stage]}${item.topic ? ` (${item.topic})` : ''}`];
 		if (item.note.trim()) parts.push(`   Extra instructions for this item: ${item.note.trim()}`);
 		return parts.join('\n');
 	});
-	return [
+	const prompt = [
 		`Write up the following ${items.length} queued conclusion${items.length === 1 ? '' : 's'}, one at a time, in the order listed. Quality over quantity: it is far better to finish fewer of these — done thoroughly, with real evidence and a genuine QA pass — than to rush through all of them.`,
 		'',
 		'Items:',
 		lines.join('\n'),
-	].join('\n');
+	];
+	if (guidance) prompt.push('', 'Additional guidance from the user for these drafts (applies to every item above):', guidance);
+	return prompt.join('\n');
 }
 
 const STEP_ICONS: Record<PlanStepStatus, string> = {
@@ -318,76 +320,76 @@ export class RunView {
 	}
 }
 
-/** The chat tab: transcript, agent runs with live plan + approvals, and the input box. */
+/** One agent session: transcript, agent runs with live plan + approvals, and the input box. Several of these can live side by side (see `ChatTabs`), each running its own agent at the same time. */
 export class ChatPanel {
 	private agent: ChatAgent;
 	private messagesEl!: HTMLElement;
 	private input!: HTMLTextAreaElement;
 	private emptyEl: HTMLElement | null = null;
 	private currentRun: RunView | null = null;
-	private queueEl!: HTMLElement;
-	private queueLaunchBtn!: HTMLButtonElement;
+	private chipEl!: HTMLElement;
+	private contextEl!: HTMLElement;
 	private unsubscribeQueue: () => void;
-	/** Cumulative token/cost total for the whole chat session (every run since the last "New chat"), shown in the toolbar — see `usage.ts`. */
+	/** Cumulative token/cost total for this session (every run since it was opened), shown above the transcript — see `usage.ts`. */
 	private sessionTotalEl!: HTMLElement;
-	/** "Burn Mode": while on, plan steps the agent itself marks quality-sensitive (QA, planning, drafting) use the boosted model from settings instead of the regular one. Per-chat UI state, not persisted. */
+	/** "Burn Mode": while on, plan steps the agent itself marks quality-sensitive (QA, planning, drafting) use the boosted model from settings instead of the regular one. Per-session UI state, not persisted. */
 	private burnModeEnabled = false;
 
-	constructor(private container: HTMLElement, private plugin: AuditorPlugin) {
-		this.agent = new ChatAgent(plugin);
+	constructor(private container: HTMLElement, private plugin: AuditorPlugin, agentId: string, private onBusyChange: (busy: boolean) => void = () => {}) {
+		this.agent = new ChatAgent(plugin, agentId);
 		this.render();
-		this.unsubscribeQueue = plugin.draftQueue.onChange(() => this.renderQueue());
-		this.renderQueue();
+		this.unsubscribeQueue = plugin.draftQueue.onChange(() => this.renderQueueChip());
+		this.renderQueueChip();
+	}
+
+	get isBusy(): boolean {
+		return this.agent.isRunning;
+	}
+
+	focusInput(): void {
+		this.input.focus();
 	}
 
 	private render(): void {
-		const bar = this.container.createDiv('auditor-chat-toolbar');
-		bar.createSpan({ text: 'Agent', cls: 'auditor-chat-toolbar-title' });
-		this.sessionTotalEl = bar.createSpan({ cls: 'auditor-chat-session-usage auditor-agent-hidden' });
-		this.sessionTotalEl.setAttr('aria-label', 'Estimated token usage and cost for this chat session, from the configured per-token prices in settings');
-		const newChat = bar.createEl('button', { text: 'New chat', cls: 'auditor-chat-new' });
-		newChat.addEventListener('click', () => this.resetChat());
-
-		this.queueEl = this.container.createDiv('auditor-queue auditor-agent-hidden');
+		this.sessionTotalEl = this.container.createDiv('auditor-chat-session-usage auditor-agent-hidden');
+		this.sessionTotalEl.setAttr('aria-label', 'Estimated token usage and cost for this session, from the configured per-token prices in settings');
 
 		this.messagesEl = this.container.createDiv('auditor-chat-messages');
 		this.renderEmptyState();
 
-		const row = this.container.createDiv('auditor-chat-input-row');
+		// Terminal-style composer: a status bar (model, context left, queue chip, Burn Mode) above the text area.
+		const row = this.container.createDiv('auditor-chat-input-row auditor-composer');
+		const bar = row.createDiv('auditor-composer-bar');
+		this.contextEl = bar.createSpan({ text: '100% context left', cls: 'auditor-composer-context' });
+		this.chipEl = bar.createDiv('auditor-queue-chip auditor-agent-hidden');
+		this.renderBurnModeToggle(bar);
 		this.input = row.createEl('textarea', { cls: 'auditor-chat-input' });
-		this.input.rows = 1;
-		this.input.placeholder = 'Ask about controls, evidence, standards or meetings…';
+		this.input.rows = 3;
 		this.input.addEventListener('keydown', (e) => {
 			if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
 				e.preventDefault();
 				this.submit();
 			}
 		});
-
-		this.renderBurnModeToggle(this.container);
 	}
 
 	/**
 	 * "Burn Mode" toggle — a plain switch below the input, not a settings-page control, since it's
 	 * meant to be flicked per-task the way you'd reach for a more expensive tool only when it's worth
 	 * it. It only ever does anything when a boosted model is actually configured; otherwise it's shown
-	 * disabled with a pointer to where to set one, rather than silently doing nothing.
+	 * disabled, with the reason in its tooltip.
 	 */
 	private renderBurnModeToggle(container: HTMLElement): void {
 		const hasBoostedModel = this.plugin.settings.boostedModel.trim() !== '';
-		const row = container.createDiv('auditor-burn-toggle-row');
-		const label = row.createEl('label', { cls: `auditor-burn-toggle${hasBoostedModel ? '' : ' is-disabled'}` });
+		const label = container.createEl('label', { cls: `auditor-burn-toggle${hasBoostedModel ? '' : ' is-disabled'}` });
+		if (!hasBoostedModel) label.setAttr('aria-label', 'Set a boosted model in Auditor settings to enable this');
 		const checkbox = label.createEl('input', { type: 'checkbox' });
 		checkbox.checked = this.burnModeEnabled;
 		checkbox.disabled = !hasBoostedModel;
 		createBurnIcon(label);
 		label.createSpan({ text: 'Burn Mode', cls: 'auditor-burn-toggle-text' });
-		checkbox.addEventListener('change', () => { this.burnModeEnabled = checkbox.checked; });
-		row.createSpan({
-			text: hasBoostedModel
-				? 'Lets the agent use the boosted model for steps it marks quality-sensitive (QA, planning, drafting).'
-				: 'Set a boosted model in Auditor settings to enable this.',
-			cls: 'auditor-field-description',
+		checkbox.addEventListener('change', () => {
+			this.burnModeEnabled = checkbox.checked;
 		});
 	}
 
@@ -405,7 +407,7 @@ export class ChatPanel {
 		}
 	}
 
-	/** Called when the view closes: ends any run and unblocks a pending approval so nothing is left hanging. */
+	/** Called when the tab closes: ends any run and unblocks a pending approval so nothing is left hanging. */
 	dispose(): void {
 		this.currentRun?.cancelPending('The chat was closed.');
 		this.agent.stop();
@@ -413,77 +415,35 @@ export class ChatPanel {
 	}
 
 	/**
-	 * The drafting-queue drawer: filled from the Controls view's "Add to queue" buttons, edited here
-	 * (per-item extra instructions, delete), and launched into a single agent run that works through
-	 * every item in order. Hidden entirely while empty so it doesn't clutter the chat for people not
-	 * using it.
+	 * The drafting queue, shown as one closeable chip inside the prompt field (every session shows
+	 * the same shared queue). Hovering lists each queued control and stage; the cross empties the
+	 * queue. Whatever is queued is launched by the next prompt sent from any session, together with
+	 * the guidance typed there.
 	 */
-	private renderQueue(): void {
+	private renderQueueChip(): void {
 		const items = this.plugin.draftQueue.list();
-		this.queueEl.toggleClass('auditor-agent-hidden', items.length === 0);
+		this.chipEl.toggleClass('auditor-agent-hidden', items.length === 0);
+		this.input.placeholder = items.length > 0
+			? 'Add guidance for the queued drafts, or press Enter to start…'
+			: 'Ask about controls, evidence, standards or meetings…';
+		this.chipEl.empty();
 		if (items.length === 0) return;
-		this.queueEl.empty();
 
-		const header = this.queueEl.createDiv('auditor-queue-header');
-		setIcon(header.createSpan('auditor-queue-icon'), 'list-todo');
-		header.createSpan({ text: `Drafting queue (${items.length})`, cls: 'auditor-queue-title' });
-		const clearBtn = header.createEl('a', { text: 'Clear', cls: 'auditor-queue-clear' });
-		clearBtn.addEventListener('click', (e) => {
+		setIcon(this.chipEl.createSpan('auditor-queue-chip-icon'), 'list-todo');
+		this.chipEl.createSpan({ text: `${items.length} item${items.length === 1 ? '' : 's'} in the drafting queue`, cls: 'auditor-queue-chip-text' });
+		const close = this.chipEl.createEl('button', { cls: 'auditor-queue-chip-close', attr: { 'aria-label': 'Clear the drafting queue' } });
+		setIcon(close, 'x');
+		close.addEventListener('click', (e) => {
 			e.preventDefault();
 			this.plugin.draftQueue.clear();
 		});
 
-		const list = this.queueEl.createDiv('auditor-queue-list');
+		const popover = this.chipEl.createDiv('auditor-queue-chip-popover');
 		for (const item of items) {
-			const row = list.createDiv('auditor-queue-item');
-			const head = row.createDiv('auditor-queue-item-head');
-			head.createSpan({ text: item.controlNumber || '(no number)', cls: 'auditor-queue-item-number' });
-			head.createSpan({ text: STAGE_LABEL[item.stage], cls: `auditor-queue-item-stage auditor-queue-item-stage-${item.stage}` });
-			if (item.topic) head.createSpan({ text: item.topic, cls: 'auditor-queue-item-topic' });
-			const removeBtn = head.createEl('a', { text: 'Remove', cls: 'auditor-queue-item-remove' });
-			removeBtn.addEventListener('click', (e) => {
-				e.preventDefault();
-				this.plugin.draftQueue.remove(item.id);
-			});
-			const note = row.createEl('input', { type: 'text', cls: 'auditor-queue-item-note' });
-			note.placeholder = 'Add instructions for this item (optional)…';
-			note.value = item.note;
-			note.addEventListener('input', () => { this.plugin.draftQueue.setNote(item.id, note.value); });
+			const line = popover.createDiv('auditor-queue-chip-line');
+			line.createSpan({ text: item.controlNumber || '(no number)', cls: 'auditor-queue-item-number' });
+			line.createSpan({ text: STAGE_LABEL[item.stage], cls: `auditor-queue-item-stage auditor-queue-item-stage-${item.stage}` });
 		}
-
-		const footer = this.queueEl.createDiv('auditor-queue-footer');
-		this.queueLaunchBtn = footer.createEl('button', { text: 'Launch queue', cls: 'mod-cta' });
-		this.queueLaunchBtn.addEventListener('click', () => this.launchQueue());
-		this.updateQueueLaunchState();
-	}
-
-	private updateQueueLaunchState(): void {
-		if (!this.queueLaunchBtn) return;
-		this.queueLaunchBtn.disabled = this.agent.isRunning || this.plugin.draftQueue.size === 0;
-		this.queueLaunchBtn.setText(this.agent.isRunning ? 'Agent is busy…' : 'Launch queue');
-	}
-
-	private launchQueue(): void {
-		const items = this.plugin.draftQueue.list();
-		if (items.length === 0 || this.agent.isRunning) return;
-		if (!this.plugin.settings.geminiApiKey) {
-			new Notice('Auditor: add your Gemini API key in the plugin settings first.');
-			return;
-		}
-		const prompt = buildQueueLaunchPrompt(items);
-		this.plugin.draftQueue.clear();
-		this.addUserMessage(`Launched the drafting queue: ${items.map((i) => `${i.controlNumber} (${STAGE_LABEL[i.stage]})`).join(', ')}.`);
-		void this.startRun(prompt);
-	}
-
-	private resetChat(): void {
-		this.currentRun?.cancelPending('The chat was reset.');
-		this.agent.stop();
-		this.agent.reset();
-		this.currentRun = null;
-		this.messagesEl.empty();
-		this.renderEmptyState();
-		this.sessionTotalEl.addClass('auditor-agent-hidden');
 	}
 
 	private scrollToBottom = (): void => {
@@ -501,16 +461,28 @@ export class ChatPanel {
 
 	private submit(): void {
 		const text = this.input.value.trim();
-		if (!text) return;
+		const queued = this.plugin.draftQueue.list();
+		const running = this.agent.isRunning;
+		// An empty prompt is only meaningful as "start the queue" — and never while this agent is busy.
+		if (!text && (queued.length === 0 || running)) return;
 		if (!this.plugin.settings.geminiApiKey) {
 			new Notice('Auditor: add your Gemini API key in the plugin settings first.');
 			return;
 		}
 		this.input.value = '';
 
-		if (this.agent.isRunning) {
+		if (running) {
 			this.agent.steer(text);
 			this.addUserMessage(text, 'Sent while working — the agent will see this before its next step');
+			return;
+		}
+		if (queued.length > 0) {
+			// Taking the items and clearing the queue happen in one synchronous step, so two sessions can never launch the same items.
+			const prompt = buildQueueLaunchPrompt(queued, text);
+			this.plugin.draftQueue.clear();
+			const launched = `Drafting queue: ${queued.map((i) => `${i.controlNumber} (${STAGE_LABEL[i.stage]})`).join(', ')}.`;
+			this.addUserMessage(text ? `${text}\n\n${launched}` : `Launched the ${launched.charAt(0).toLowerCase()}${launched.slice(1)}`);
+			void this.startRun(prompt);
 			return;
 		}
 		this.addUserMessage(text);
@@ -524,7 +496,6 @@ export class ChatPanel {
 			this.agent.stop();
 		}, this.scrollToBottom);
 		this.currentRun = run;
-		this.updateQueueLaunchState();
 		this.scrollToBottom();
 
 		const host: AgentHost = {
@@ -538,7 +509,12 @@ export class ChatPanel {
 					this.sessionTotalEl.removeClass('auditor-agent-hidden');
 					this.sessionTotalEl.setText(`Session: ${formatUsageLine(event.sessionTotals)}`);
 				}
-				else if (event.type === 'context') run.updateContext(event.usage);
+				else if (event.type === 'context') {
+					run.updateContext(event.usage);
+					this.contextEl.setText(`${Math.max(0, 100 - Math.round(event.usage.percentUsed))}% context left`);
+					this.contextEl.removeClass('is-normal', 'is-approaching', 'is-compaction_required');
+					this.contextEl.addClass(`is-${event.usage.status}`);
+				}
 				else if (event.type === 'compaction') run.noteCompaction(event.beforeTokens, event.afterTokens, event.duplicatesRemoved, event.elided);
 				else run.finish(event);
 			},
@@ -547,9 +523,13 @@ export class ChatPanel {
 			requestCheckpoint: (info) => run.showCheckpoint(info),
 			requestErrorRecovery: (info) => run.showErrorRecovery(info),
 		};
-		await this.agent.run(text, host, () => this.burnModeEnabled);
-		if (this.currentRun === run) this.currentRun = null;
-		this.updateQueueLaunchState();
+		this.onBusyChange(true);
+		try {
+			await this.agent.run(text, host, () => this.burnModeEnabled);
+		} finally {
+			if (this.currentRun === run) this.currentRun = null;
+			this.onBusyChange(false);
+		}
 		this.input.focus();
 	}
 }

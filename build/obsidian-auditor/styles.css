@@ -2956,3 +2956,227 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
 }
+
+/* ─── Agent chat tabs ─────────────────────────────────────────────────── */
+.auditor-chat-tabs {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+	overflow-x: auto;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.auditor-chat-tab {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 6px 5px 10px;
+	border-bottom: 2px solid transparent;
+	cursor: pointer;
+	white-space: nowrap;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.auditor-chat-tab.is-active {
+	border-bottom-color: var(--interactive-accent);
+	color: var(--text-normal);
+	font-weight: 600;
+}
+
+.auditor-chat-tab-rename {
+	width: 110px;
+	height: 22px;
+	padding: 0 6px;
+	font-size: inherit;
+}
+
+.auditor-chat-tab-busy {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	animation: auditor-tab-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes auditor-tab-pulse {
+	50% { opacity: 0.3; }
+}
+
+.auditor-chat-tab-close,
+.auditor-chat-tab-add {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	padding: 2px;
+	height: auto;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+
+.auditor-chat-tab-close:hover,
+.auditor-chat-tab-add:hover {
+	color: var(--text-normal);
+}
+
+.auditor-chat-tab-close svg,
+.auditor-chat-tab-add svg {
+	width: 14px;
+	height: 14px;
+}
+
+.auditor-chat-tab-body {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+.auditor-chat-pane {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding-top: 8px;
+}
+
+/* Drafting-queue chip, inside the prompt field */
+.auditor-chat-input-row {
+	position: relative;
+}
+
+.auditor-queue-chip {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 6px;
+	padding: 3px 4px 3px 9px;
+	border-radius: 999px;
+	background: var(--background-modifier-hover);
+	border: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+}
+
+.auditor-queue-chip-icon svg {
+	width: 13px;
+	height: 13px;
+	display: block;
+}
+
+.auditor-queue-chip-close {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	padding: 2px;
+	height: auto;
+	border-radius: 50%;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.auditor-queue-chip-close:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-border);
+}
+
+.auditor-queue-chip-close svg {
+	width: 12px;
+	height: 12px;
+}
+
+.auditor-queue-chip-popover {
+	display: none;
+	position: absolute;
+	left: 0;
+	bottom: calc(100% + 6px);
+	z-index: 10;
+	min-width: 180px;
+	max-height: 240px;
+	overflow-y: auto;
+	padding: 8px 10px;
+	flex-direction: column;
+	gap: 4px;
+	border-radius: 8px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+}
+
+.auditor-queue-chip:hover .auditor-queue-chip-popover {
+	display: flex;
+}
+
+.auditor-queue-chip-line {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/* ─── Terminal-style composer ─────────────────────────────────────────── */
+.auditor-composer {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-primary);
+	transition: border-color 0.15s ease;
+}
+
+.auditor-composer:focus-within {
+	border-color: var(--interactive-accent);
+}
+
+.auditor-composer-bar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px 12px;
+	padding: 5px 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.auditor-composer-context.is-approaching { color: var(--color-orange, #e08a1e); }
+.auditor-composer-context.is-compaction_required { color: var(--color-red, #e53935); }
+
+.auditor-composer .auditor-queue-chip {
+	margin: 0;
+	border-radius: 3px;
+	padding: 1px 3px 1px 7px;
+}
+
+.auditor-composer .auditor-burn-toggle {
+	margin-left: auto;
+	font-size: inherit;
+}
+
+.auditor-composer .auditor-chat-input {
+	display: block;
+	field-sizing: fixed;
+	width: 100%;
+	min-height: 84px;
+	max-height: 320px;
+	border: none;
+	border-radius: 0 0 4px 4px;
+	padding: 10px 12px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	line-height: 1.5;
+	resize: vertical;
+	background: transparent;
+}
+
+.auditor-composer .auditor-chat-input:focus {
+	border: none;
+	box-shadow: none;
+}

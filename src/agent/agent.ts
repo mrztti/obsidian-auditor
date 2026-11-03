@@ -7,15 +7,16 @@ import type { AgentHost } from './types';
 /**
  * The interactive chat's agent — a thin, behavior-preserving wrapper over `RoleAgent` (the
  * generalized loop the agent swarm's specialist roles also run on) configured with the full tool
- * registry, the standard system prompt, and the plugin's single shared, unscoped memory store
- * (exactly what this used to be before the loop was extracted to be reusable).
+ * registry, the standard system prompt, and the plugin's single shared, unscoped memory store.
+ * Every chat tab owns one of these (distinct `agentId`), but they all read and write that same
+ * memory — so what one tab learns, the others can recall.
  */
 export class ChatAgent {
 	private inner: RoleAgent;
 
-	constructor(plugin: AuditorPlugin) {
+	constructor(plugin: AuditorPlugin, agentId = 'chat') {
 		this.inner = new RoleAgent(plugin, {
-			agentId: 'chat',
+			agentId,
 			tools: AGENT_TOOLS,
 			systemPrompt: buildSystemPrompt(),
 			memory: plugin.agentMemory,
