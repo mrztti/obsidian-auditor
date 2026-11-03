@@ -192,6 +192,8 @@ export interface AuditorSettings {
 	persistentMemoryMaxItems: number;
 	/** Cap on how many entries the research/evidence cache (`src/agent/researchCache.ts`) may hold before the oldest are evicted. */
 	evidenceCacheMaxEntries: number;
+	/** When true, the chat/swarm agent never pauses for its routine 30-step checkpoint and the 300-step hard stop is lifted — it runs until it finishes or the user clicks Stop. */
+	disableAgentStepLimit: boolean;
 	/** Durable facts the agent carries across chat sessions — see `AgentMemoryItem`. Not meant to be hand-edited; use the "Clear agent memory" action in this settings tab, or the agent's own remember_fact/recall_memory tools. */
 	agentMemory: AgentMemoryItem[];
 
@@ -327,6 +329,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	reservedSystemToolTokens: 4_000,
 	persistentMemoryMaxItems: 200,
 	evidenceCacheMaxEntries: 300,
+	disableAgentStepLimit: false,
 	agentMemory: [],
 	rapidFireMaxBatchCostUsd: 0,
 	rapidFireMaxTokensPerTopicBatch: 60_000,
@@ -836,6 +839,16 @@ export class AuditorSettingTab extends PluginSettingTab {
 		this.renderIntField(containerEl, 'Reserved system/tool tokens', 'reservedSystemToolTokens', 100);
 		this.renderIntField(containerEl, 'Persistent memory max items', 'persistentMemoryMaxItems', 1);
 		this.renderIntField(containerEl, 'Evidence cache max entries', 'evidenceCacheMaxEntries', 1);
+
+		new Setting(containerEl)
+			.setName('Disable agent step limit')
+			.setDesc('Stops the agent pausing for a checkpoint every 30 steps and lifts the 300-step hard stop. It then runs until it finishes or you select Stop, so a runaway loop can use a lot of tokens.')
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.disableAgentStepLimit).onChange(async (value) => {
+					this.plugin.settings.disableAgentStepLimit = value;
+					await this.plugin.saveSettings();
+				}),
+			);
 
 		const memoryCount = this.plugin.settings.agentMemory.filter((m) => !m.supersededBy).length;
 		new Setting(containerEl)

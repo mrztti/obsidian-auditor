@@ -303,7 +303,8 @@ export class RoleAgent {
 		let planEnforced = false;
 
 		try {
-			for (let iteration = 0; iteration < ABSOLUTE_MAX_ITERATIONS; iteration++) {
+			const unlimited = this.plugin.settings.disableAgentStepLimit;
+			for (let iteration = 0; unlimited || iteration < ABSOLUTE_MAX_ITERATIONS; iteration++) {
 				if (this.stopped) {
 					this.history.push({ role: 'model', parts: [{ text: '(Stopped by the user.)' }] });
 					host.emit({ type: 'final', text: 'Stopped.', askedUser: false, burn: false });
@@ -403,7 +404,7 @@ export class RoleAgent {
 
 				// Routine checkpoint (FR-4.1): pause every CHECKPOINT_INTERVAL steps instead of just running out.
 				// Nothing below is reset — the next loop iteration (on 'continue') picks up exactly where this left off.
-				if ((iteration + 1) % CHECKPOINT_INTERVAL === 0) {
+				if (!unlimited && (iteration + 1) % CHECKPOINT_INTERVAL === 0) {
 					const decision = await host.requestCheckpoint(buildSnapshot());
 					if (decision === 'stop' || this.stopped) {
 						this.history.push({ role: 'model', parts: [{ text: '(Stopped by the user at a checkpoint.)' }] });
