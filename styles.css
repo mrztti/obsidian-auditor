@@ -2849,3 +2849,110 @@ column comfortably — see the NARROW_BREAKPOINT constant there. */
 	font-size: 0.75em;
 	padding: 1px 8px;
 }
+
+/* ─── Controls dashboard panel ─────────────────────────── */
+.auditor-controls-dashboard-pane {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	padding: 20px 16px 24px;
+}
+
+.auditor-controls-dashboard-pane > * {
+	flex-shrink: 0;
+}
+
+.auditor-dash-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+	gap: 16px;
+}
+
+.auditor-dash-card {
+	padding: 16px 18px 18px;
+	border-radius: 14px;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+}
+
+.auditor-dash-card-title {
+	margin: 0 0 14px;
+	font-size: var(--font-ui-medium);
+	font-weight: 600;
+}
+
+.auditor-dash-charts {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-around;
+	gap: 20px;
+}
+
+.auditor-dash-chart {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+}
+
+.auditor-dash-chart-label {
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	color: var(--text-muted);
+}
+
+.auditor-dash-donut {
+	position: relative;
+	flex-shrink: 0;
+}
+
+.auditor-dash-chart-large .auditor-dash-donut { width: 170px; height: 170px; }
+.auditor-dash-chart-small .auditor-dash-donut { width: 110px; height: 110px; }
+
+.auditor-dash-donut svg {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.auditor-dash-donut-centre {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.auditor-dash-donut-total {
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+
+.auditor-dash-chart-large .auditor-dash-donut-total { font-size: 2.2em; }
+.auditor-dash-chart-small .auditor-dash-donut-total { font-size: 1.5em; }
+
+.auditor-dash-legend {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 110px;
+}
+
+.auditor-dash-legend-row {
+	display: grid;
+	grid-template-columns: 10px 1fr auto;
+	align-items: center;
+	gap: 8px;
+	font-size: var(--font-ui-small);
+}
+
+.auditor-dash-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+}
+
+.auditor-dash-legend-count {
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}

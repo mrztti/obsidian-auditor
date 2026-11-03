@@ -12,6 +12,7 @@ import { GeminiEmbeddings } from './geminiEmbeddings';
 import { GeminiGenerate } from './geminiGenerate';
 import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
 import { ControlsView, CONTROLS_VIEW_TYPE } from './controlsView';
+import { ControlsDashboardView, CONTROLS_DASHBOARD_VIEW_TYPE } from './controlsDashboardView';
 import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
 import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
 import { AgentChatView, AGENT_CHAT_VIEW_TYPE } from './agent/chatView';
@@ -176,6 +177,10 @@ export default class AuditorPlugin extends Plugin {
 			(leaf) => new ControlsView(leaf, this),
 		);
 		this.registerView(
+			CONTROLS_DASHBOARD_VIEW_TYPE,
+			(leaf) => new ControlsDashboardView(leaf, this),
+		);
+		this.registerView(
 			CONTROL_DETAIL_VIEW_TYPE,
 			(leaf) => new ControlDetailView(leaf, this),
 		);
@@ -217,6 +222,10 @@ export default class AuditorPlugin extends Plugin {
 			void this.activateControlsView();
 		});
 
+		this.addRibbonIcon('pie-chart', 'Open controls dashboard', () => {
+			void this.activateControlsDashboardView();
+		});
+
 		this.addRibbonIcon('file-plus', 'Add control', () => {
 			new AddControlModal(this.app, (record) => {
 				void this.saveControlNote(record);
@@ -253,6 +262,14 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Open controls',
 			callback: () => {
 				void this.activateControlsView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-controls-dashboard',
+			name: 'Open controls dashboard',
+			callback: () => {
+				void this.activateControlsDashboardView();
 			},
 		});
 
@@ -523,6 +540,17 @@ export default class AuditorPlugin extends Plugin {
 		}
 		const leaf = this.app.workspace.getLeaf('tab');
 		await leaf.setViewState({ type: CONTROLS_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	async activateControlsDashboardView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(CONTROLS_DASHBOARD_VIEW_TYPE)[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getLeaf('tab');
+		await leaf.setViewState({ type: CONTROLS_DASHBOARD_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
 	}
 
