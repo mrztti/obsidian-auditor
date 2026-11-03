@@ -74,6 +74,8 @@ export interface RoleAgentOptions {
 	systemPrompt: string;
 	/** This agent's own scoped memory — see `ToolContext.memory`. */
 	memory: AgentMemoryStore;
+	/** Strict-revision mode (the Reviewer's "apply notes" agent): no plan is demanded up front, and `propose_control_changes` skips the evidence / QA gates meant for drafting — the reviewer's notes are the instruction. */
+	strictRevision?: boolean;
 }
 
 /**
@@ -96,6 +98,7 @@ export class RoleAgent {
 	private toolsByName: Map<string, AgentTool>;
 	private systemPrompt: string;
 	private memory: AgentMemoryStore;
+	private strictRevision: boolean;
 	private history: Content[] = [];
 	private plan: AgentPlan | null = null;
 	private controls: ControlStore;
@@ -124,6 +127,7 @@ export class RoleAgent {
 		this.toolsByName = new Map(options.tools.map((t) => [t.declaration.name ?? '', t]));
 		this.systemPrompt = options.systemPrompt;
 		this.memory = options.memory;
+		this.strictRevision = options.strictRevision ?? false;
 		this.controls = new ControlStore(plugin);
 		this.sessionPlans = new SessionPlanStore(plugin, this.controls);
 	}
@@ -283,6 +287,7 @@ export class RoleAgent {
 			controls: this.controls,
 			sessionPlans: this.sessionPlans,
 			memory: this.memory,
+			strictRevision: this.strictRevision,
 			host,
 			getPlan: () => this.plan,
 			setPlan: (plan) => {
@@ -300,7 +305,7 @@ export class RoleAgent {
 		const declarations = this.tools.map((t) => t.declaration);
 		const systemPrompt = this.systemPrompt;
 		let nudges = 0;
-		let planEnforced = false;
+		let planEnforced = this.strictRevision;
 
 		try {
 			const unlimited = this.plugin.settings.disableAgentStepLimit;

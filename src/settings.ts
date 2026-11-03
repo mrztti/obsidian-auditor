@@ -194,6 +194,8 @@ export interface AuditorSettings {
 	evidenceCacheMaxEntries: number;
 	/** When true, the chat/swarm agent never pauses for its routine 30-step checkpoint and the 300-step hard stop is lifted — it runs until it finishes or the user clicks Stop. */
 	disableAgentStepLimit: boolean;
+	/** Control numbers currently in the Reviewer view's review set — persisted so the set survives a reload. */
+	reviewerControlNumbers: string[];
 	/** Durable facts the agent carries across chat sessions — see `AgentMemoryItem`. Not meant to be hand-edited; use the "Clear agent memory" action in this settings tab, or the agent's own remember_fact/recall_memory tools. */
 	agentMemory: AgentMemoryItem[];
 
@@ -330,6 +332,7 @@ export const DEFAULT_SETTINGS: AuditorSettings = {
 	persistentMemoryMaxItems: 200,
 	evidenceCacheMaxEntries: 300,
 	disableAgentStepLimit: false,
+	reviewerControlNumbers: [],
 	agentMemory: [],
 	rapidFireMaxBatchCostUsd: 0,
 	rapidFireMaxTokensPerTopicBatch: 60_000,

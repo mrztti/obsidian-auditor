@@ -14,6 +14,8 @@ export interface ToolContext {
 	sessionPlans: SessionPlanStore;
 	/** This agent's own scoped memory (`recall_memory`/`remember_fact`) — the single chat agent's is `plugin.agentMemory` (unscoped); each swarm specialist gets its own. */
 	memory: AgentMemoryStore;
+	/** True for the Reviewer's strict-revision agent: apply the reviewer's notes as written, without the drafting workflow's evidence/QA gates. */
+	strictRevision: boolean;
 	host: AgentHost;
 	getPlan(): AgentPlan | null;
 	setPlan(plan: AgentPlan): void;

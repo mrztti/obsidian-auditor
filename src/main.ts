@@ -12,6 +12,7 @@ import { GeminiEmbeddings } from './geminiEmbeddings';
 import { GeminiGenerate } from './geminiGenerate';
 import { AuditorView, AUDITOR_VIEW_TYPE } from './auditorView';
 import { ControlsView, CONTROLS_VIEW_TYPE } from './controlsView';
+import { ReviewerView, REVIEWER_VIEW_TYPE } from './reviewer/reviewerView';
 import { ControlsDashboardView, CONTROLS_DASHBOARD_VIEW_TYPE } from './controlsDashboardView';
 import { ControlDetailView, CONTROL_DETAIL_VIEW_TYPE } from './controlDetailView';
 import { SessionPlanView, SESSION_PLAN_VIEW_TYPE } from './sessionPlanView';
@@ -186,6 +187,10 @@ export default class AuditorPlugin extends Plugin {
 			(leaf) => new ControlsDashboardView(leaf, this),
 		);
 		this.registerView(
+			REVIEWER_VIEW_TYPE,
+			(leaf) => new ReviewerView(leaf, this),
+		);
+		this.registerView(
 			CONTROL_DETAIL_VIEW_TYPE,
 			(leaf) => new ControlDetailView(leaf, this),
 		);
@@ -229,6 +234,10 @@ export default class AuditorPlugin extends Plugin {
 
 		this.addRibbonIcon('pie-chart', 'Open controls dashboard', () => {
 			void this.activateControlsDashboardView();
+		});
+
+		this.addRibbonIcon('clipboard-check', 'Open reviewer', () => {
+			void this.activateReviewerView();
 		});
 
 		this.addRibbonIcon('file-plus', 'Add control', () => {
@@ -275,6 +284,14 @@ export default class AuditorPlugin extends Plugin {
 			name: 'Open controls dashboard',
 			callback: () => {
 				void this.activateControlsDashboardView();
+			},
+		});
+
+		this.addCommand({
+			id: 'open-reviewer',
+			name: 'Open reviewer',
+			callback: () => {
+				void this.activateReviewerView();
 			},
 		});
 
@@ -545,6 +562,17 @@ export default class AuditorPlugin extends Plugin {
 		}
 		const leaf = this.app.workspace.getLeaf('tab');
 		await leaf.setViewState({ type: CONTROLS_VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
+
+	async activateReviewerView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(REVIEWER_VIEW_TYPE)[0];
+		if (existing) {
+			void this.app.workspace.revealLeaf(existing);
+			return;
+		}
+		const leaf = this.app.workspace.getLeaf('tab');
+		await leaf.setViewState({ type: REVIEWER_VIEW_TYPE, active: true });
 		void this.app.workspace.revealLeaf(leaf);
 	}
 

@@ -761,6 +761,38 @@ const RERANK_SCHEMA: Schema = {
 };
 
 /** Thin wrapper around Gemini's generateContent, used for every LLM step across the plugin. */
+export interface ControlSelectionCandidate {
+	number: string;
+	/** Compact, pre-rendered description of the control (standard, topic, status, ratings, text, conclusion excerpts). */
+	description: string;
+}
+
+export interface ControlSelectionResult {
+	/** A maximum count the request itself implies ("the 10 worst…"); 0 when it implies none. */
+	limit: number;
+	selected: { controlNumber: string; reason: string; relevance: number }[];
+}
+
+const CONTROL_SELECTION_SCHEMA: Schema = {
+	type: Type.OBJECT,
+	properties: {
+		limit: { type: Type.INTEGER, description: 'The maximum number of controls the user\'s request itself asks for (e.g. "the 10 most critical" → 10). 0 if the request names no maximum — in that case select EVERY control that fits, however many that is.' },
+		selected: {
+			type: Type.ARRAY,
+			items: {
+				type: Type.OBJECT,
+				properties: {
+					controlNumber: { type: Type.STRING, description: 'Exact control number, copied from the input.' },
+					reason: { type: Type.STRING, description: 'One short sentence on why this control fits the request.' },
+					relevance: { type: Type.INTEGER, description: '1 (barely fits) to 10 (fits perfectly).' },
+				},
+				required: ['controlNumber', 'reason', 'relevance'],
+			},
+		},
+	},
+	required: ['limit', 'selected'],
+};
+
 export class GeminiGenerate {
 	private ai: GoogleGenAI;
 	private model: string;
@@ -1846,5 +1878,26 @@ export class GeminiGenerate {
 
 		const { thinking, parsed } = await this.generateStructured<Omit<EvidenceGoalGroupingPlan, 'thinking'>>(prompt, EVIDENCE_GOAL_GROUPING_SCHEMA);
 		return { thinking, ...parsed };
+	}
+
+	/**
+	 * Picks the controls from one batch that fit a free-text request. There is deliberately no cap on
+	 * how many may be selected; the model reports a `limit` only when the request itself asks for a
+	 * maximum, and the caller applies it across all batches.
+	 */
+	async selectControlsForReview(request: string, candidates: ControlSelectionCandidate[]): Promise<ControlSelectionResult> {
+		const prompt = [
+			'You are helping an auditor choose which written controls to put in front of a reviewer.',
+			'Select every control below that fits the request. Do NOT hold back or cap the selection for brevity: if 200 controls fit, select 200.',
+			'Only if the request itself asks for a maximum (for example "the 10 most critical"), report it in `limit`; otherwise `limit` is 0.',
+			'Use only control numbers that appear below, copied exactly. Judge on the control text, status, ratings and conclusions shown.',
+			'',
+			`Request: ${request}`,
+			'',
+			'Controls:',
+			candidates.map((c) => `[${c.number}] ${c.description}`).join('\n\n'),
+		].join('\n');
+		const { parsed } = await this.generateStructured<ControlSelectionResult>(prompt, CONTROL_SELECTION_SCHEMA, this.model, false);
+		return parsed;
 	}
 }

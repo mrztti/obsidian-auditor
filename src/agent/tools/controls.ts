@@ -249,7 +249,7 @@ export const proposeChangesTool: AgentTool = {
 		if (resolved.length === 0) return { ok: false, output: { error: 'None of the proposed values differ from the current content — nothing to change.' }, summary: 'Proposal contained no actual changes' };
 
 		const touchesStatus = resolved.some((c) => c.changedFields.some((f) => (STATUS_FIELDS as readonly string[]).includes(f)));
-		if (touchesStatus && !ctx.hasCurrentEvidence()) {
+		if (touchesStatus && !ctx.strictRevision && !ctx.hasCurrentEvidence()) {
 			return {
 				ok: false,
 				output: {
@@ -260,7 +260,7 @@ export const proposeChangesTool: AgentTool = {
 		}
 
 		const missingQa: string[] = [];
-		for (const c of resolved) {
+		for (const c of ctx.strictRevision ? [] : resolved) {
 			const stages = new Set(c.changedFields.map((f) => (f === 'comments' ? undefined : STAGE_FOR_FIELD[f])).filter((s): s is DraftStage => s !== undefined));
 			for (const stage of stages) {
 				if (!ctx.hasQaReview(c.number, stage)) missingQa.push(`${c.number} (${STAGE_LABEL[stage]})`);
@@ -297,7 +297,9 @@ export const proposeChangesTool: AgentTool = {
 				saved,
 				rejectedByUser: rejectedItems.map((s) => ({ controlNumber: s.controlNumber, stage: s.stage, comment: decision.comments[s.key] ?? '' })),
 				...(failed.length > 0 ? { failedToSave: failed } : {}),
-				nextStep: saved.length === 0 || rejectedItems.length > 0 || failed.length > 0
+				nextStep: ctx.strictRevision
+					? 'Do not propose anything further. Write the short final summary: for each control, what was changed, and what was left unchanged and why.'
+					: saved.length === 0 || rejectedItems.length > 0 || failed.length > 0
 					? 'Some items were not saved. For each entry in rejectedByUser, use its "comment" as the requestedChanges when re-drafting ONLY that control/stage with prepare_control_conclusion — do not touch or re-propose anything that already saved. Re-run QA only for what changed, then propose again. If nothing is listed in rejectedByUser either, the run was stopped before a decision — stop as well.'
 					: 'All changes saved. Write a short final summary for the user.',
 			},

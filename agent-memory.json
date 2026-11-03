@@ -898,5 +898,68 @@
     "version": 1,
     "createdAt": "2026-10-19T15:44:44.845Z",
     "agentId": "coordinator"
+  },
+  {
+    "id": "mem-mw0yc2dw-0",
+    "category": "acceptedDecision",
+    "content": "1001 (Stage 2): user accepted.",
+    "provenance": "1001",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:18:34.772Z"
+  },
+  {
+    "id": "mem-mw0yc2ej-1",
+    "category": "acceptedConclusion",
+    "content": "1001 Stage 2: rated NC (user-approved conclusion saved to the control note).",
+    "provenance": "1001",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:18:34.795Z"
+  },
+  {
+    "id": "mem-mw0yc2es-2",
+    "category": "acceptedDecision",
+    "content": "1002 (Stage 1): user accepted.",
+    "provenance": "1002",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:18:34.804Z"
+  },
+  {
+    "id": "mem-mw0yljxf-0",
+    "category": "acceptedDecision",
+    "content": "1001 (Stage 2): user accepted.",
+    "provenance": "1001",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:25:57.411Z"
+  },
+  {
+    "id": "mem-mw0yljy2-1",
+    "category": "acceptedConclusion",
+    "content": "1001 Stage 2: rated NC (user-approved conclusion saved to the control note).",
+    "provenance": "1001",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:25:57.434Z"
+  },
+  {
+    "id": "mem-mw0yljyc-2",
+    "category": "acceptedDecision",
+    "content": "1002 (Stage 2): user accepted.",
+    "provenance": "1002",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:25:57.444Z"
+  },
+  {
+    "id": "mem-mw0yljyk-3",
+    "category": "acceptedConclusion",
+    "content": "1002 Stage 2: rated NC (user-approved conclusion saved to the control note).",
+    "provenance": "1002",
+    "scope": "vault",
+    "version": 1,
+    "createdAt": "2026-11-03T17:25:57.452Z"
   }
 ]

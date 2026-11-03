@@ -39,6 +39,8 @@ export interface ControlRecord {
 	toeRating: ControlRating;
 	/** Same idea as `todReady`, for Stage 2. */
 	toeReady: boolean;
+	/** Free-text notes a reviewer wrote about this control (Reviewer view). The agent reads them as change requests when the user launches it from the Reviewer's third tab. */
+	reviewNotes: string;
 	/** Append-only log of dated comments, oldest first — never edited or removed in place, only added to. */
 	comments: ControlComment[];
 }
@@ -83,6 +85,7 @@ export function emptyControlRecord(number = ''): ControlRecord {
 		toeConclusion: '',
 		toeRating: '',
 		toeReady: false,
+		reviewNotes: '',
 		comments: [],
 	};
 }
@@ -108,6 +111,15 @@ function parseCommentLine(line: string): ControlComment | null {
 	if (match) return { date: match[1] ?? '', text: match[2] ?? '' };
 	// Legacy/free-text line with no date prefix (e.g. an older single free-text comment, or an imported cell) — keep it, undated.
 	return { date: '', text: trimmed };
+}
+
+/** Review notes are free text inside a "## "-sectioned note, so any line that would read as a section heading gets a leading backslash on write (and loses exactly one on read). */
+function escapeSectionLines(text: string): string {
+	return text.replace(/^(\\*##)/gm, '\\$1');
+}
+
+function unescapeSectionLines(text: string): string {
+	return text.replace(/^\\(\\*##)/gm, '$1');
 }
 
 /**
@@ -145,6 +157,7 @@ export function buildControlNoteContent(record: ControlRecord): string {
 		record.toeConclusion, '',
 		'## ToE Rating', '', record.toeRating, '',
 		'## ToE Ready', '', String(record.toeReady), '',
+		'## Review Notes', '', escapeSectionLines(record.reviewNotes), '',
 		'## Comments', '', ...record.comments.map(formatCommentLine),
 	].join('\n');
 }
@@ -184,6 +197,7 @@ export function parseControlNoteContent(content: string, fallbackNumber = ''): C
 		toeConclusion: sections.get('Test of Effectiveness (Stage 2)') ?? '',
 		toeRating: (sections.get('ToE Rating') ?? '').trim() as ControlRating,
 		toeReady: (sections.get('ToE Ready') ?? '').trim() === 'true',
+		reviewNotes: unescapeSectionLines(sections.get('Review Notes') ?? ''),
 		comments: (sections.get('Comments') ?? '')
 			.split(/\r?\n/)
 			.map(parseCommentLine)
