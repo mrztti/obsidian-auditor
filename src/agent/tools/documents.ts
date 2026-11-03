@@ -12,6 +12,13 @@ import { clampInt, str, truncate, type AgentTool } from './types';
 const SOURCES: StoreKind[] = ['standards', 'evidence', 'interviewEvidence', 'writtenControls'];
 const CURRENT_EVIDENCE_SOURCES: StoreKind[] = ['evidence', 'interviewEvidence'];
 
+/** Hard ceiling on `limit` — high enough for a sweep across a very large document set, while still bounded. */
+const MAX_RESULT_LIMIT = 1000;
+/** Characters of result text one `search_documents` call aims to return in total; with many results the per-result excerpt shrinks to fit, instead of the call flooding the context window. */
+const RESULT_TEXT_BUDGET_CHARS = 150_000;
+const DEFAULT_EXCERPT_CHARS = 1500;
+const MIN_EXCERPT_CHARS = 150;
+
 const SOURCE_DESCRIPTION =
 	'"standards" = the standards/requirements being audited against; "evidence" = evidence documents supplied by the audited party, current for this audit; "interviewEvidence" = meeting/interview notes and evidence gathered in sessions, current for this audit; "writtenControls" = the control notes themselves, in this audit. For finalized past-engagement reports (style reference only, never evidence), use search_reference_style instead.';
 
@@ -49,7 +56,8 @@ export const searchDocumentsTool: AgentTool = {
 			properties: {
 				query: { type: Type.STRING, description: 'Keyword-dense search query.' },
 				sources: { type: Type.ARRAY, items: { type: Type.STRING, enum: SOURCES }, description: `Which indexes to search (default: all). ${SOURCE_DESCRIPTION}` },
-				limit: { type: Type.INTEGER, description: 'Max results per source (default 8, max 20).' },
+				limit: { type: Type.INTEGER, description: `Maximum number of results to return per source (default 8, up to ${MAX_RESULT_LIMIT}). You decide: use a small number for a focused lookup, and a large one (hundreds, up to ${MAX_RESULT_LIMIT}) when the question spans many documents (e.g. "which of the evidence files mention X"). Fewer results may come back if fewer match.` },
+				excerptChars: { type: Type.INTEGER, description: `Optional: characters of text to return per result (100–3000). By default each excerpt is up to ${DEFAULT_EXCERPT_CHARS} characters, shortened automatically when there are many results so the whole response stays a manageable size. Ask for short excerpts when you only need to know WHICH documents match, then read_document the relevant ones.` },
 			},
 			required: ['query'],
 		},
@@ -58,7 +66,7 @@ export const searchDocumentsTool: AgentTool = {
 	run: async (args, ctx) => {
 		const query = str(args.query).trim();
 		if (!query) return { ok: false, output: { error: 'query is required.' }, summary: 'Empty search query' };
-		const limit = clampInt(args.limit, 8, 1, 20);
+		const limit = clampInt(args.limit, 8, 1, MAX_RESULT_LIMIT);
 		const kinds = parseSources(args.sources);
 
 		// Research cache (FR-5.2): an equivalent search (same query/sources/limit) made earlier in this
@@ -74,10 +82,14 @@ export const searchDocumentsTool: AgentTool = {
 		});
 
 		if (kinds.some((k) => CURRENT_EVIDENCE_SOURCES.includes(k))) ctx.markCurrentEvidence();
+		const requestedChars = args.excerptChars === undefined ? undefined : clampInt(args.excerptChars, DEFAULT_EXCERPT_CHARS, 100, 3000);
+		const excerptChars = requestedChars ?? Math.min(DEFAULT_EXCERPT_CHARS, Math.max(MIN_EXCERPT_CHARS, Math.floor(RESULT_TEXT_BUDGET_CHARS / Math.max(results.length, 1))));
+		const shortened = requestedChars === undefined && excerptChars < DEFAULT_EXCERPT_CHARS;
 		return {
 			output: {
 				resultCount: results.length,
-				results: results.map(({ source, r }) => ({ source, location: label(r), path: r.sourcePath, score: Number(r.score.toFixed(3)), text: truncate(r.text, 1500) })),
+				results: results.map(({ source, r }) => ({ source, location: label(r), path: r.sourcePath, score: Number(r.score.toFixed(3)), text: truncate(r.text, excerptChars) })),
+				...(shortened ? { note: `Excerpts were shortened to ${excerptChars} characters each to keep this large result manageable. Use read_document on the files that matter for their full text.` } : {}),
 				...(results.length === 0 ? { hint: 'Nothing found. The index may be empty or not built yet, or try different terms.' } : {}),
 			},
 			summary: `${results.length} results across ${kinds.join(', ')}${hit ? ' (cached)' : ''}`,
@@ -95,7 +107,7 @@ export const listDocumentsTool: AgentTool = {
 			properties: {
 				source: { type: Type.STRING, enum: SOURCES, description: SOURCE_DESCRIPTION },
 				nameContains: { type: Type.STRING, description: 'Case-insensitive substring of the path.' },
-				limit: { type: Type.INTEGER, description: 'Default 30, max 100.' },
+				limit: { type: Type.INTEGER, description: `Maximum number of files to return (default 30, up to ${MAX_RESULT_LIMIT}). The response always reports the total number of matching files, so raise this when you need to see more of them.` },
 			},
 			required: ['source'],
 		},
@@ -111,7 +123,7 @@ export const listDocumentsTool: AgentTool = {
 			.getFiles()
 			.filter((f) => inFolder(f, folder) && (!needle || f.path.toLowerCase().includes(needle)))
 			.sort((a, b) => b.stat.mtime - a.stat.mtime);
-		const limit = clampInt(args.limit, 30, 1, 100);
+		const limit = clampInt(args.limit, 30, 1, MAX_RESULT_LIMIT);
 		return Promise.resolve({
 			output: {
 				total: files.length,
